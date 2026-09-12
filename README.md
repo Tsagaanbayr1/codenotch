@@ -14,17 +14,23 @@ two never disagree.
 
 | Provider | Source | How |
 |---|---|---|
-| **Claude Code** | official | The OAuth token in the login keychain, against the same endpoint Claude Code's own `/usage` uses. |
+| **Claude Code** | official | Claude Code's own `/usage` command, run headlessly. No credential is read — the CLI uses its own. |
 | **Cursor** | official | The editor's own signed-in session, read from its local SQLite state — no separate sign-in. |
 | **Codex** | official | Codex's own app server, asked live for the current rate limits. Falls back to its rollout log when Codex isn't running. |
-| **Antigravity** | official where licensed, otherwise a request count | Antigravity's local language server first, then Google's quota endpoint; a plain count when neither will answer for the account. |
+| **Antigravity** | official while it's running, otherwise a request count | Antigravity's own local language server, which holds the credential and answers with the figure its panel shows. A plain count from its transcripts when it isn't running. |
 | **GLM** | official | Z.ai's Coding Plan monitor endpoint, with a key borrowed from whichever coding tool already holds one — Claude Code's `settings.json`, ZCode, or OpenCode. |
 
-Codenotch never signs in anywhere. Every reading is borrowed from a credential
-or session a tool on your Mac already holds — install and sign in to any of
-them, and its ring appears. Switching a provider off in Settings stops its
-credential being read at all and forgets the readings taken from it; it does
-not sign you out of the tool that owns the account, and the row says so.
+Codenotch never signs in anywhere, and it **makes no keychain request at all** —
+macOS is never asked to hand over a saved login, so there is no prompt at any
+point. Claude Code, Codex and Antigravity go further: their numbers come from
+running the tool's own command, and no token of yours is read or sent. Cursor
+and GLM still borrow a key their own tool wrote to a file on this Mac, because
+neither publishes a command that would answer without one.
+
+Install and sign in to any of these tools and its ring appears. Switching a
+provider off in Settings stops it being read at all and forgets the readings
+taken from it; it does not sign you out of the tool that owns the account, and
+the row says so.
 
 It also answers **"is it still working?"** — a thin arc spins inside a
 provider's ring while a session is busy, and becomes a pulsing amber ring when
@@ -103,16 +109,34 @@ those can change without notice. Every adapter's response shape is pinned by
 tests, and every failure degrades to a visible status (`stale`, `needsAuth`,
 `error`) rather than an invented number.
 
-**Keychain:** the app is signed with a stable Developer ID identity so the
-one-time "Always Allow" grant on Claude Code's and Antigravity's keychain
-items survives rebuilds. The secret itself is read only when the owning app
-has actually changed it — checked via the item's modification date, which
-isn't behind the same access prompt as the credential — so a valid grant does
-not mean a prompt on every poll.
+**Credentials:** there is no keychain access anywhere in the app — not one
+call, for any provider. Claude runs `claude -p "/usage"`, Codex runs `codex
+app-server`, and Antigravity is asked through its own language server; each of
+those holds its own token and answers with the live figure. `/usage` is a local
+command, so it costs no tokens and spends none of your quota.
 
-**Rate limits:** Claude's endpoint returns 429 if polled too hard, with an
-unhelpful `Retry-After: 0`. The back-off treats that as a floor-raiser only —
-60s, doubling per consecutive 429, capped at 15 minutes — and the deadline is
+Two providers are not yet in that state, and the app should not pretend
+otherwise. Cursor reads the session token its editor stores in SQLite and sends
+it to `cursor.com`; GLM reads a Coding Plan key from `settings.json`, ZCode or
+OpenCode and sends it to Z.ai. Both are files rather than keychain items, and
+both would stop working if the key moved — the vendors publish no command that
+answers without one.
+
+What that costs is honesty about absence. The tool has to actually be there:
+where Claude Code's CLI isn't installed, or Antigravity isn't running, the ring
+says so instead of falling back to anything. Two smaller things went with the
+tokens — Antigravity's plan name, which only its credential carried, and the
+direct Google quota call, which only a licensed account could make and which
+the language server already outranked whenever both could answer.
+
+**Polling:** a reading spawns a process, so the schedule is deliberately slow —
+five minutes while something is running, fifteen when nothing is. Opening the
+notch or clicking a ring refreshes immediately, which is when it matters.
+
+**Rate limits:** GLM's endpoint returns 429 if polled too hard. A server's
+`Retry-After` is treated as a floor-raiser only — an endpoint that answers `0`
+is giving no guidance, and obeying it is what keeps you limited — so the wait
+is 60s, doubling per consecutive 429, capped at 15 minutes, and the deadline is
 persisted, so relaunching during a penalty waits instead of spending an
 attempt on it. Polling drops to every 5 minutes when nothing is running, and
 right-clicking the notch offers **Refresh now**.

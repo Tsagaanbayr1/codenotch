@@ -15,8 +15,6 @@ enum ProviderStatus: Equatable {
     case ok
     case stale(since: Date)
     case needsAuth
-    /// macOS was asked for a credential that exists, and refused.
-    case accessDenied
     case unsupported(String)
     case error(String)
 
@@ -172,11 +170,6 @@ struct ProviderSnapshot: Identifiable, Equatable {
         if hasReading { return nil }
         switch status {
         case .needsAuth:      return authPrompt
-        case .accessDenied:
-            // Says what happened and what fixes it. "Sign in to Claude Code"
-            // would send someone who *is* signed in to fix the wrong thing.
-            return "Codenotch was refused access to \(displayName)'s saved "
-                 + "login. Click this ring to ask again, and choose Always Allow."
         case .unsupported(let why): return why
         case .error(let why): return "Couldn't read usage — \(why)"
         case .stale, .ok:     return "Waiting for the first reading…"

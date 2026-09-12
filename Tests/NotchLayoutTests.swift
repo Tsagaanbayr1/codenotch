@@ -877,8 +877,8 @@ final class StatusMessageHeightTests: XCTestCase {
     private var everyStatusCard: [(name: String, snapshot: ProviderSnapshot)] {
         let states: [(String, ProviderStatus)] = [
             ("needsAuth", .needsAuth),
-            ("accessDenied", .accessDenied),
             ("unsupported", .unsupported("The free plan has nothing for Cursor to meter yet")),
+            ("missingCLI", .unsupported(ClaudeCLIProvider.missingCLIMessage)),
             ("error", .error("HTTP 500")),
             ("stale", .stale(since: .distantPast)),
             ("ok", .ok)
@@ -907,12 +907,17 @@ final class StatusMessageHeightTests: XCTestCase {
         }
     }
 
-    /// The message that found this: three lines where one was reserved.
-    func testARefusalMessageIsGivenItsRealHeight() {
-        let refused = ProviderSnapshot(id: "gemini", displayName: "Antigravity",
-                                       glyph: .antigravity, fidelity: .official,
-                                       status: .accessDenied, windows: [])
-        let message = try! XCTUnwrap(refused.statusMessage)
+    /// The kind of message that found this: three lines where one was reserved.
+    ///
+    /// The original was the keychain refusal, which no longer exists — nothing
+    /// reads a credential any more. The longest message the app can still show
+    /// is the missing-CLI one, and it has exactly the same shape of problem.
+    func testALongMessageIsGivenItsRealHeight() {
+        let missing = ProviderSnapshot(id: "claude", displayName: "Claude",
+                                       glyph: .claude, fidelity: .official,
+                                       status: .unsupported(ClaudeCLIProvider.missingCLIMessage),
+                                       windows: [])
+        let message = try! XCTUnwrap(missing.statusMessage)
         XCTAssertGreaterThan(NotchLayout.bodyTextHeight(message),
                              2 * NotchLayout.cardBodyLineHeight,
                              "the message that motivated this now fits on one line")

@@ -16,9 +16,6 @@ struct SettingsView: View {
     /// Returns false when there was nothing to open.
     let signIn: (String) -> Bool
     let switchAccount: (String) -> Bool
-    /// Re-reads a provider's credential. For a declined keychain prompt that is
-    /// the whole remedy: asking again is what puts the prompt back on screen.
-    let retry: (String) -> Void
     @ObservedObject var updater: Updater
 
     var body: some View {
@@ -34,7 +31,7 @@ struct SettingsView: View {
                 ForEach(accounts) {
                     AccountRow(provider: $0, preferences: preferences,
                                signOut: signOut, signIn: signIn,
-                               switchAccount: switchAccount, retry: retry)
+                               switchAccount: switchAccount)
                 }
                 // Beside the switches it explains, not stranded at the end of
                 // the page.
@@ -198,10 +195,20 @@ struct SettingsView: View {
     /// unless it was expected — and choosing Allow instead of Always Allow makes
     /// it return on every read, which is what "it asks every time" turns out to
     /// be.
-    static let keychainCopy =
-        "macOS will ask once for permission to read Claude Code's and "
-        + "Antigravity's saved logins. Choose Always Allow — plain Allow makes "
-        + "it ask again every time."
+    /// What the first run promises instead of a warning.
+    ///
+    /// This used to warn that macOS would ask for permission to read a saved
+    /// login, because it would. It never will now — the app makes no keychain
+    /// request at all — and saying so is worth more than the warning was.
+    ///
+    /// Deliberately does not claim more than that. Cursor and GLM still borrow
+    /// a key their own tool wrote to a file, and a note that said "never reads
+    /// a login" would be false for two of the five rows on the same screen.
+    static let privacyCopy =
+        "Codenotch never asks macOS for a saved login — it makes no keychain "
+        + "request at all. Claude Code, Codex and Antigravity are read by "
+        + "running their own commands. Cursor and GLM borrow a key those tools "
+        + "already keep in a file on this Mac."
 
     private var setupNote: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -215,7 +222,7 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                Text(SettingsView.keychainCopy)
+                Text(SettingsView.privacyCopy)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -238,7 +245,6 @@ private struct AccountRow: View {
     let signOut: (String) -> Void
     let signIn: (String) -> Bool
     let switchAccount: (String) -> Bool
-    let retry: (String) -> Void
 
     private var isConnected: Bool { preferences.isConnected(provider.id) }
 
@@ -267,21 +273,6 @@ private struct AccountRow: View {
                 // if the browser is not signed in. Sending someone to a login
                 // screen from a row that says "connected" is the wrong answer
                 // whenever the real thing is one launch away.
-                // The way back from a declined keychain prompt, and the only
-                // one: declining is easy to do by reflex, and nothing else on
-                // screen will ask macOS again.
-                //
-                // Shown only while macOS is actually refusing. It used to be
-                // permanent for any keychain-backed provider, which meant it sat
-                // there next to a working account offering to fix nothing — and
-                // when it *was* needed there was no way to tell the two apart.
-                if isConnected, provider.wasRefusedAccess {
-                    Button("Allow access…") { retry(provider.id) }
-                        .controlSize(.small)
-                        .help("Asks macOS for \(provider.name)'s saved login again. "
-                              + "Choose Always Allow and it will stop asking.")
-                }
-
                 if isConnected, let destination {
                     Button(destination.title) { open(destination) }
                         .controlSize(.small)
@@ -327,14 +318,6 @@ private struct AccountRow: View {
                     .foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-        } else if provider.wasRefusedAccess {
-            // Not a sign-in problem, so do not send them off to sign in. The
-            // credential is right there and macOS is the one saying no — the
-            // remedy is the button on this same row.
-            Text("macOS is not letting Codenotch read \(provider.name)'s saved "
-                 + "login. Choose Allow access… above, then Always Allow.")
-                .foregroundStyle(.orange)
-                .fixedSize(horizontal: false, vertical: true)
         } else {
             HStack(spacing: 8) {
                 Text(provider.signIn.explanation)

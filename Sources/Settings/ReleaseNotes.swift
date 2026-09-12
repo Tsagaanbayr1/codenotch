@@ -31,6 +31,57 @@ struct ReleaseNote: Equatable {
 enum ReleaseNotes {
     static let all: [ReleaseNote] = [
         ReleaseNote(
+            version: "1.5.0",
+            headline: "Your logins stay yours: no keychain access anywhere in the app.",
+            changes: [
+                ReleaseNote.Change(
+                    title: "Claude Code is read by running Claude Code",
+                    detail: "The percentage used to come from Anthropic's usage "
+                          + "endpoint, called with the OAuth token out of your "
+                          + "login keychain. It now comes from `claude -p "
+                          + "\"/usage\"` — the same command you can run in a "
+                          + "terminal, which uses its own login. It is a local "
+                          + "command, so it costs no tokens and none of your quota."
+                ),
+                ReleaseNote.Change(
+                    title: "No keychain prompt, ever again",
+                    detail: "Antigravity was the last account still read from the "
+                          + "keychain; it is now asked through its own language "
+                          + "server, the way Antigravity's own panel asks. macOS "
+                          + "is never asked to hand over a saved login, so the "
+                          + "\"Allow access\" prompt — and the button that "
+                          + "existed to recover from declining it — are gone."
+                ),
+                ReleaseNote.Change(
+                    title: "Multiple Claude accounts are selected properly",
+                    detail: "A work login under ~/.claude-work is now chosen with "
+                          + "CLAUDE_CONFIG_DIR, the way Claude Code documents, "
+                          + "instead of a guess at the matching keychain item."
+                ),
+                ReleaseNote.Change(
+                    title: "Your Claude row now shows which account it is",
+                    detail: "The old token carried a plan and no address, so every "
+                          + "Claude row named a plan with nobody attached. It now "
+                          + "shows the email as well."
+                ),
+                ReleaseNote.Change(
+                    title: "Gentler on the battery",
+                    detail: "A reading now runs a command rather than making a "
+                          + "request, so the background check is every five "
+                          + "minutes while you are working and fifteen when you "
+                          + "are not. Opening the notch or clicking a ring still "
+                          + "refreshes straight away."
+                ),
+                ReleaseNote.Change(
+                    title: "A missing tool says so",
+                    detail: "Where Claude Code's CLI is not installed, or "
+                          + "Antigravity is not running, the card says which tool "
+                          + "is missing instead of showing a number it cannot "
+                          + "check. Antigravity's plan name went with its token."
+                ),
+            ]
+        ),
+        ReleaseNote(
             version: "1.4.0",
             headline: "Two more accounts, four community fixes, and honest duplicates.",
             changes: [

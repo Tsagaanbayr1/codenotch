@@ -21,6 +21,10 @@ final class NotchWindowController {
     var signInItems: [(title: String, action: () -> Void)] = []
     /// Refetch a single provider, asked for by clicking its ring.
     var onRefreshProvider: ((String) -> Void)?
+    /// The notch just unfolded. Opening it is the one moment someone is
+    /// certainly looking at the numbers, so it is worth a reading — the store
+    /// decides whether enough time has passed to be worth spending one.
+    var onOpen: (() -> Void)?
     /// Open the settings window, asked for by clicking the handle.
     var onOpenSettings: (() -> Void)?
 
@@ -349,6 +353,7 @@ final class NotchWindowController {
             foldWork = nil
             guard !model.isExpanded else { return }
             withAnimation(NotchMotion.unfold) { model.isExpanded = true }
+            onOpen?()
             return
         }
 

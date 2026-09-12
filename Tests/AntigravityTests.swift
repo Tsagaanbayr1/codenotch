@@ -2,98 +2,6 @@ import XCTest
 import Sparkle
 @testable import Codenotch
 
-/// Fixtures are the real thing: the keychain payload's shape and the actual
-/// `loadCodeAssist` response from a signed-in install.
-final class AntigravityCredentialsTests: XCTestCase {
-    /// Go's keyring package base64-encodes behind this marker instead of
-    /// storing raw JSON, which is the first thing that has to be undone.
-    private func stored(_ json: String) -> Data {
-        Data(("go-keyring-base64:" + Data(json.utf8).base64EncodedString()).utf8)
-    }
-
-    private let payload = """
-    {"auth_method":"consumer","token":{"access_token":"ya29.token",\
-    "expiry":"2126-08-31T21:53:49.575961+07:00","refresh_token":"r","token_type":"Bearer"}}
-    """
-
-    func testItDecodesTheGoKeyringEnvelope() throws {
-        let creds = try XCTUnwrap(AntigravityCredentials.decode(stored(payload)))
-        XCTAssertEqual(creds.accessToken, "ya29.token")
-        XCTAssertEqual(creds.authMethod, "consumer")
-        XCTAssertFalse(creds.isExpired)
-    }
-
-    /// Without stripping the marker the value is not JSON at all, so this is
-    /// the difference between reading the account and reporting it missing.
-    func testRawJSONWithoutTheMarkerStillWorks() throws {
-        let creds = try XCTUnwrap(AntigravityCredentials.decode(
-            Data(Data(payload.utf8).base64EncodedString().utf8)))
-        XCTAssertEqual(creds.accessToken, "ya29.token")
-    }
-
-    /// An offset timestamp, not UTC and not epoch milliseconds. Reading it as
-    /// either is how a live token reads as long expired — the mistake Codex's
-    /// `procStart` already cost this project once.
-    func testItParsesAnOffsetTimestampAtTheRightInstant() throws {
-        let date = try XCTUnwrap(AntigravityCredentials.parse("2026-08-31T21:53:49.575961+07:00"))
-        // 21:53:49 at +07:00 is 14:53:49 UTC.
-        var utc = Calendar(identifier: .gregorian)
-        utc.timeZone = TimeZone(identifier: "UTC")!
-        XCTAssertEqual(utc.component(.hour, from: date), 14)
-        XCTAssertEqual(utc.component(.minute, from: date), 53)
-    }
-
-    func testItParsesWholeSecondsToo() {
-        XCTAssertNotNil(AntigravityCredentials.parse("2026-08-31T21:53:49+07:00"))
-    }
-
-    func testAnExpiredTokenIsRecognised() throws {
-        let old = payload.replacingOccurrences(of: "2126-", with: "2020-")
-        let creds = try XCTUnwrap(AntigravityCredentials.decode(stored(old)))
-        XCTAssertTrue(creds.isExpired)
-    }
-
-    func testGarbageIsRejectedRatherThanCrashing() {
-        XCTAssertNil(AntigravityCredentials.decode(Data("not base64 at all".utf8)))
-    }
-}
-
-final class AntigravityTierTests: XCTestCase {
-    /// Verbatim from a signed-in install. Note what is absent: no used, no
-    /// limit, no reset. That absence is why the provider reports the plan and
-    /// admits there is nothing metered instead of drawing a ring.
-    private let real = Data("""
-    {"allowedTiers":[{"id":"standard-tier","name":"Gemini Code Assist",
-    "description":"Unlimited coding assistant with the most powerful Gemini models",
-    "userDefinedCloudaicompanionProject":true,"privacyNotice":{},"isDefault":true,
-    "usesGcpTos":true}],"ineligibleTiers":[{"reasonCode":"UNSUPPORTED_CLIENT",
-    "reasonMessage":"This client is no longer supported.","tierId":"free-tier",
-    "tierName":"Gemini Code Assist for individuals"}]}
-    """.utf8)
-
-    func testItNamesThePlanFromTheDefaultAllowedTier() {
-        XCTAssertEqual(AntigravityProvider.tier(in: real), "Gemini Code Assist")
-    }
-
-    /// An ineligible tier is what you cannot have; picking it would name the
-    /// wrong plan on the cell.
-    func testItIgnoresIneligibleTiers() {
-        XCTAssertNotEqual(AntigravityProvider.tier(in: real), "Gemini Code Assist for individuals")
-    }
-
-    func testCurrentTierWinsWhenTheAccountHasChosenOne() {
-        let chosen = Data("""
-        {"currentTier":{"id":"paid","name":"Gemini Code Assist Standard"},
-         "allowedTiers":[{"id":"standard-tier","name":"Gemini Code Assist","isDefault":true}]}
-        """.utf8)
-        XCTAssertEqual(AntigravityProvider.tier(in: chosen), "Gemini Code Assist Standard")
-    }
-
-    func testItFallsBackRatherThanThrowingOnNonsense() {
-        XCTAssertEqual(AntigravityProvider.tier(in: Data("{}".utf8)), "Gemini")
-    }
-}
-
 /// Counting is the only usage figure available, so its edges matter more than
 /// usual — there is no vendor number to fall back on if this is wrong.
 final class AntigravityActivityTests: XCTestCase {
@@ -184,52 +92,6 @@ final class AntigravityActivityTests: XCTestCase {
     func testNoActivityReadsAsNoneRatherThanZeroPercent() {
         XCTAssertEqual(AntigravityActivity(requestsToday: 0, lastRequest: nil).summary,
                        "no requests today")
-    }
-}
-
-/// The quota parser is written from message names in Antigravity's binary, not
-/// from a response — no licensed account was available to produce one. So what
-/// is tested is mostly its refusal to believe things: a shape it does not
-/// recognise must yield nothing and send the provider to the honest fallback,
-/// never a confident ring built on a guess.
-final class AntigravityQuotaTests: XCTestCase {
-    func testItReadsBucketsIntoWindows() {
-        let body = Data("""
-        {"quotaGroups":[{"displayName":"Gemini","buckets":[
-          {"name":"daily","displayName":"Daily","used":250,"limit":1000,
-           "resetTime":"2026-09-01T00:00:00Z"}]}]}
-        """.utf8)
-        let windows = AntigravityProvider.windows(in: body)
-        XCTAssertEqual(windows.count, 1)
-        XCTAssertEqual(windows.first?.usedFraction ?? 0, 0.25, accuracy: 0.0001)
-        XCTAssertEqual(windows.first?.label, "Daily")
-    }
-
-    /// Cursor's free plan reports an included limit of zero, and dividing by it
-    /// produced a confident 0% for an account well into its month. Nothing with
-    /// a zero limit is ever a percentage.
-    func testAZeroLimitIsDroppedRatherThanDividedBy() {
-        let body = Data(#"{"buckets":[{"name":"x","used":0,"limit":0}]}"#.utf8)
-        XCTAssertTrue(AntigravityProvider.windows(in: body).isEmpty)
-    }
-
-    func testNonsenseValuesAreDropped() {
-        let wild = Data(#"{"buckets":[{"name":"x","used":9999,"limit":10}]}"#.utf8)
-        XCTAssertTrue(AntigravityProvider.windows(in: wild).isEmpty)
-        let negative = Data(#"{"buckets":[{"name":"x","used":-5,"limit":10}]}"#.utf8)
-        XCTAssertTrue(AntigravityProvider.windows(in: negative).isEmpty)
-    }
-
-    /// The likeliest future: Google answers with a shape this does not know.
-    /// Empty is the correct outcome — it routes to the fallback message.
-    func testAnUnfamiliarShapeYieldsNothing() {
-        XCTAssertTrue(AntigravityProvider.windows(in: Data(#"{"somethingElse":[1,2]}"#.utf8)).isEmpty)
-        XCTAssertTrue(AntigravityProvider.windows(in: Data("not json".utf8)).isEmpty)
-    }
-
-    func testAMissingResetIsToleratedRatherThanFatal() {
-        let body = Data(#"{"buckets":[{"name":"d","used":1,"limit":4}]}"#.utf8)
-        XCTAssertEqual(AntigravityProvider.windows(in: body).count, 1)
     }
 }
 
@@ -362,168 +224,6 @@ final class AntigravityBridgeTests: XCTestCase {
     }
 }
 
-/// Every keychain read risks interrupting someone, and the answer changes about
-/// hourly — so it is read about hourly, not twice a minute.
-final class CredentialCacheTests: XCTestCase {
-    private struct Token { let expired: Bool }
-
-    func testItReadsOnceAndThenHoldsWhatItHas() throws {
-        var reads = 0
-        let cache = CredentialCache<Token> { $0.expired }
-        for _ in 0..<10 {
-            _ = try? cache.value { reads += 1; return Token(expired: false) }
-        }
-        XCTAssertEqual(reads, 1, "the keychain was read every time")
-    }
-
-    /// Expiry is not what decides. It used to be — "hold it while it is valid"
-    /// — and that is what made the app ask over and over: once a token aged
-    /// out, every caller went back to the keychain, once a minute, all night,
-    /// for a token that could not change until the owning app next ran. Reading
-    /// an unchanged item cannot give a different answer; it can only raise
-    /// another dialogue.
-    func testAnExpiredValueIsNotReadAgainWhileTheItemIsUnchanged() {
-        var reads = 0
-        let stamp = Date(timeIntervalSince1970: 1_000)
-        let cache = CredentialCache<Token> { $0.expired }
-        for _ in 0..<10 {
-            _ = try? cache.value(itemModifiedAt: { stamp }) {
-                reads += 1; return Token(expired: true)
-            }
-        }
-        XCTAssertEqual(reads, 1, "an unchanged item was read \(reads) times")
-    }
-
-    /// But a rotation is picked up at once — that is the whole reason to look.
-    func testAChangedItemIsReadAgainImmediately() {
-        var reads = 0
-        var stamp = Date(timeIntervalSince1970: 1_000)
-        let cache = CredentialCache<Token> { $0.expired }
-        _ = try? cache.value(itemModifiedAt: { stamp }) { reads += 1; return Token(expired: true) }
-        stamp = Date(timeIntervalSince1970: 2_000)   // the owning app refreshed it
-        _ = try? cache.value(itemModifiedAt: { stamp }) { reads += 1; return Token(expired: false) }
-        XCTAssertEqual(reads, 2, "a rotated token was not picked up")
-    }
-
-    /// With no probe to go on there is nothing to compare, so it falls back to
-    /// waiting — still not once per tick.
-    func testWithoutAProbeItWaitsRatherThanAsksEveryTime() {
-        var reads = 0
-        var clock = Date(timeIntervalSince1970: 0)
-        let cache = CredentialCache<Token>(now: { clock }) { $0.expired }
-        _ = try? cache.value { reads += 1; return Token(expired: true) }
-        clock.addTimeInterval(60)
-        _ = try? cache.value { reads += 1; return Token(expired: true) }
-        XCTAssertEqual(reads, 1, "a minute later it asked again")
-
-        clock.addTimeInterval(10 * 60)
-        _ = try? cache.value { reads += 1; return Token(expired: true) }
-        XCTAssertEqual(reads, 2, "it never looked again at all")
-    }
-
-    /// One refusal must not become a refusal a minute. macOS said no; asking
-    /// again on the next tick is what the user experiences as "it keeps asking
-    /// even though I chose Always Allow".
-    func testARefusalIsNeverRetriedWhileTheItemIsUnchanged() {
-        struct Denied: Error {}
-        var reads = 0
-        var clock = Date(timeIntervalSince1970: 0)
-        var stamp = Date(timeIntervalSince1970: 1_000)
-        let cache = CredentialCache<Token>(now: { clock }) { $0.expired }
-
-        // A good read first, so there is something to fall back on.
-        _ = try? cache.value(itemModifiedAt: { stamp }) { reads += 1; return Token(expired: true) }
-        // Then the item rotates and the read is refused.
-        stamp = Date(timeIntervalSince1970: 2_000)
-        _ = try? cache.value(itemModifiedAt: { stamp }) { () -> Token in
-            reads += 1; throw Denied()
-        }
-        XCTAssertEqual(reads, 2)
-
-        // An hour of ticks against an item that has not moved again.
-        for _ in 0..<60 {
-            clock.addTimeInterval(60)
-            _ = try? cache.value(itemModifiedAt: { stamp }) { () -> Token in
-                reads += 1; throw Denied()
-            }
-        }
-        XCTAssertEqual(reads, 2, "a refusal was retried \(reads - 2) more times")
-    }
-
-    /// A rotation is the exception, and has to be: the old secret is gone, so
-    /// the new one is the only one worth having even after a refusal.
-    func testARotationIsStillWorthAskingForAfterARefusal() {
-        struct Denied: Error {}
-        var reads = 0
-        var stamp = Date(timeIntervalSince1970: 1_000)
-        let cache = CredentialCache<Token> { $0.expired }
-
-        _ = try? cache.value(itemModifiedAt: { stamp }) { reads += 1; return Token(expired: true) }
-        stamp = Date(timeIntervalSince1970: 2_000)
-        _ = try? cache.value(itemModifiedAt: { stamp }) { () -> Token in
-            reads += 1; throw Denied()
-        }
-        stamp = Date(timeIntervalSince1970: 3_000)   // the owning app rotated it again
-        _ = try? cache.value(itemModifiedAt: { stamp }) { reads += 1; return Token(expired: false) }
-        XCTAssertEqual(reads, 3, "a rotated secret was never fetched")
-    }
-
-    /// And "Allow access…" still gets through, because raising the dialogue is
-    /// exactly what that button is for.
-    func testForgettingClearsARefusalBackoff() {
-        struct Denied: Error {}
-        var reads = 0
-        var clock = Date(timeIntervalSince1970: 0)
-        let stamp = Date(timeIntervalSince1970: 1_000)
-        let cache = CredentialCache<Token>(now: { clock }) { $0.expired }
-
-        _ = try? cache.value(itemModifiedAt: { stamp }) { reads += 1; return Token(expired: true) }
-        clock.addTimeInterval(10 * 60)
-        _ = try? cache.value(itemModifiedAt: { Date(timeIntervalSince1970: 2_000) }) { () -> Token in
-            reads += 1; throw Denied()
-        }
-        XCTAssertEqual(reads, 2)
-
-        cache.forget()
-        _ = try? cache.value(itemModifiedAt: { stamp }) { reads += 1; return Token(expired: false) }
-        XCTAssertEqual(reads, 3, "Allow access… could not reach the keychain")
-    }
-
-    /// The case this exists for: a different account is signed into, the server
-    /// rejects a token that has not expired, and the held copy has to go.
-    func testForgettingForcesAFreshRead() {
-        var reads = 0
-        let cache = CredentialCache<Token> { $0.expired }
-        _ = try? cache.value { reads += 1; return Token(expired: false) }
-        cache.forget()
-        _ = try? cache.value { reads += 1; return Token(expired: false) }
-        XCTAssertEqual(reads, 2)
-    }
-
-    /// A failure must never be handed back as if it were a credential — but it
-    /// is remembered as an *attempt*, so the same refusal is not put to macOS
-    /// again a minute later.
-    func testAFailedReadIsRememberedWithoutBeingCached() {
-        struct Nope: Error {}
-        var reads = 0
-        var clock = Date(timeIntervalSince1970: 0)
-        let cache = CredentialCache<Token>(now: { clock }) { $0.expired }
-
-        for _ in 0..<3 {
-            _ = try? cache.value { () -> Token in reads += 1; throw Nope() }
-        }
-        XCTAssertEqual(reads, 1, "the same refusal was put to macOS \(reads) times")
-        XCTAssertThrowsError(try cache.value { Token(expired: false) },
-                             "a failure was served as if it were a credential")
-
-        // It does try again eventually, so a grant given in Keychain Access is
-        // picked up without a restart.
-        clock.addTimeInterval(10 * 60)
-        _ = try? cache.value { () -> Token in reads += 1; throw Nope() }
-        XCTAssertEqual(reads, 2, "it never looked again at all")
-    }
-}
-
 /// Antigravity had no activity monitor at all, so its ring never showed the
 /// working state the other three had — and the store never learned it was busy,
 /// staying on its slow idle poll while usage was actively being spent.
@@ -622,7 +322,6 @@ final class FirstRunCopyTests: XCTestCase {
                             providers: { [] },
                             signOut: { _ in }, signIn: { _ in true },
                             switchAccount: { _ in true },
-                            retry: { _ in },
                             updater: Updater())
     }
 
@@ -638,12 +337,21 @@ final class FirstRunCopyTests: XCTestCase {
                       "nothing warns that the Claude app is not Claude Code")
     }
 
-    /// The keychain prompt is the only interruption in the whole first run, and
-    /// choosing Allow rather than Always Allow is what makes it recur.
-    func testTheKeychainPromptIsExplainedBeforeItAppears() {
-        let copy = SettingsView.keychainCopy
-        XCTAssertTrue(copy.contains("Always Allow"))
-        XCTAssertTrue(copy.lowercased().contains("macos will ask"))
+    /// The first run used to warn that macOS would ask for a saved login. It
+    /// never will now, so the note promises that instead — but only that.
+    ///
+    /// The claim it must *not* make is the tempting one. "Never reads a saved
+    /// login" is false while Cursor and GLM still borrow a key from a file, and
+    /// a privacy promise that overstates by two rows is worse than none.
+    func testTheFirstRunPromiseIsExactlyTrue() {
+        let copy = SettingsView.privacyCopy
+        XCTAssertTrue(copy.contains("never asks macOS for a saved login"))
+        XCTAssertFalse(copy.lowercased().contains("always allow"),
+                       "there is no keychain prompt left to explain")
+        for borrower in ["Cursor", "GLM"] {
+            XCTAssertTrue(copy.contains(borrower),
+                          "\(borrower) still borrows a key and the note must say so")
+        }
     }
 }
 
@@ -651,11 +359,11 @@ final class FirstRunCopyTests: XCTestCase {
 /// routine event — the app was restarted, not the account lost.
 @MainActor
 final class AntigravityFallbackTests: XCTestCase {
-    /// `credentialExpired` is the store's word for "still true, just old", and
+    /// `notAnswering` is the store's word for "still true, just old", and
     /// it keeps the previous reading instead of discarding it. Anything that
     /// supersedes history would throw away the percentage.
     func testTheAwayStateKeepsTheLastReading() {
-        let status = UsageStore.statusForTesting(UsageProviderError.credentialExpired)
+        let status = UsageStore.statusForTesting(UsageProviderError.notAnswering)
         XCTAssertFalse(UsageStore.supersedesHistory(status),
                        "a restarted Antigravity would wipe the percentage")
         guard case .stale = status else {
@@ -800,201 +508,3 @@ final class MenuBarIconTests: XCTestCase {
 
 
 
-/// Declining the keychain prompt is easy to do by reflex. Until now it was
-/// reported as being signed out — sending someone who *is* signed in to fix
-/// something that is not broken — and nothing on screen would ask again.
-@MainActor
-final class KeychainRefusalTests: XCTestCase {
-    /// The three statuses macOS returns for "the item is there and you may not
-    /// have it". Deny produces the first two; the third is the same refusal
-    /// arriving without a prompt.
-    func testARefusalIsNotMistakenForBeingSignedOut() {
-        XCTAssertTrue(ClaudeCredentials.wasRefused(errSecAuthFailed))
-        XCTAssertTrue(ClaudeCredentials.wasRefused(errSecUserCanceled))
-        XCTAssertTrue(ClaudeCredentials.wasRefused(errSecInteractionNotAllowed))
-    }
-
-    /// A missing item genuinely does mean nobody has signed in.
-    func testAMissingItemIsStillTreatedAsSignedOut() {
-        XCTAssertFalse(ClaudeCredentials.wasRefused(errSecItemNotFound))
-    }
-
-    func testTheStatusSaysWhatHappenedAndWhatToDo() {
-        let snapshot = ProviderSnapshot(
-            id: "claude", displayName: "Claude", glyph: .claude,
-            fidelity: .official, status: .accessDenied, windows: []
-        )
-        let message = snapshot.statusMessage ?? ""
-        XCTAssertTrue(message.contains("refused"))
-        XCTAssertTrue(message.contains("Always Allow"))
-        XCTAssertFalse(message.contains("Sign in"), "it tells a signed-in user to sign in")
-    }
-
-    /// The credential is still valid — we were simply not let in to re-read it.
-    /// Throwing the last reading away would punish a mis-click.
-    func testARefusalKeepsTheLastReading() {
-        XCTAssertFalse(UsageStore.supersedesHistory(.accessDenied))
-    }
-
-    func testTheErrorMapsToTheRefusedStatus() {
-        guard case .accessDenied =
-            UsageStore.statusForTesting(UsageProviderError.accessDenied) else {
-            return XCTFail("a refusal was reported as something else")
-        }
-    }
-}
-
-/// The button that puts the keychain prompt back on screen.
-@MainActor
-final class ReauthorizeTests: XCTestCase {
-    private final class Stub: UsageProvider, @unchecked Sendable {
-        let id = "claude"
-        let displayName = "Claude"
-        let glyph = ProviderGlyph.claude
-        private(set) var forgotten = 0
-        private(set) var fetches = 0
-
-        // `nonisolated` on purpose: nested in a @MainActor test class, an
-        // isolated method does not satisfy the protocol's requirement, and
-        // Swift quietly falls back to the extension's no-op default — the
-        // test then passes or fails for the wrong reason.
-        nonisolated func forgetCachedCredential() { forgotten += 1 }
-        func fetchSnapshot() async throws -> ProviderSnapshot {
-            fetches += 1
-            return ProviderSnapshot(id: id, displayName: displayName, glyph: glyph,
-                                    fidelity: .official, status: .ok, windows: [])
-        }
-    }
-
-    private func store(_ stub: Stub) -> UsageStore {
-        let name = "Reauthorize.\(UUID().uuidString)"
-        let d = UserDefaults(suiteName: name)!
-        d.removePersistentDomain(forName: name)
-        return UsageStore(providers: [stub], archive: UsageArchive(defaults: d))
-    }
-
-    /// The part that makes the button work at all. A plain refresh is served
-    /// from the cached token whenever it is still valid, so the keychain is
-    /// never touched and no prompt appears.
-    func testItDropsTheHeldCredentialBeforeReading() async {
-        let stub = Stub()
-        // Held in a variable rather than called on a temporary: the store owns
-        // the refresh task, and letting it go out of scope cancels the work
-        // this is measuring.
-        let store = store(stub)
-        store.reauthorize(providerID: "claude")
-        try? await Task.sleep(nanoseconds: 200_000_000)
-        XCTAssertEqual(stub.forgotten, 1, "the cached credential was reused, so macOS was never asked")
-        XCTAssertEqual(stub.fetches, 1)
-    }
-
-    /// An unknown id must not quietly fetch something else.
-    func testAnUnknownProviderIsIgnored() async {
-        let stub = Stub()
-        let store = store(stub)
-        store.reauthorize(providerID: "nobody")
-        try? await Task.sleep(nanoseconds: 150_000_000)
-        XCTAssertEqual(stub.forgotten, 0)
-        XCTAssertEqual(stub.fetches, 0)
-    }
-}
-
-/// Only two providers keep a credential in the keychain; the others read files
-/// and can never raise a prompt.
-final class KeychainProviderTests: XCTestCase {
-    private func summary(_ id: String) -> ProviderSummary {
-        ProviderSummary(id: id, name: id, glyph: .claude, account: nil,
-                        signIn: .guidance("x"))
-    }
-
-    func testOnlyKeychainBackedProvidersOfferIt() {
-        XCTAssertTrue(summary("claude").usesKeychain)
-        XCTAssertTrue(summary("claude-work").usesKeychain, "every profile's token is a keychain item")
-        XCTAssertTrue(summary("gemini").usesKeychain)
-        XCTAssertFalse(summary("cursor").usesKeychain, "Cursor reads a file, not the keychain")
-        XCTAssertFalse(summary("codex").usesKeychain, "Codex reads a file, not the keychain")
-    }
-}
-
-/// Claude Code files a new keychain item on every token rotation rather than
-/// updating one in place, so an account used for months accumulates several
-/// under `Claude Code-credentials` — six, on the machine this was found on.
-/// `kSecMatchLimitOne` gives no ordering guarantee across them, so the app
-/// could read an old, expired duplicate while a valid one sat beside it: the
-/// ring showed "Waiting for the first reading…" forever, with a working token
-/// one item away. `KeychainItem.winner` is the selection that replaced it —
-/// the query it is chosen from cannot run in a test, since there is no real
-/// keychain to point it at.
-final class KeychainDuplicateTests: XCTestCase {
-    private func item(ref: String, modified: Date?) -> [CFString: Any] {
-        var item: [CFString: Any] = [kSecValuePersistentRef: Data(ref.utf8)]
-        if let modified { item[kSecAttrModificationDate] = modified }
-        return item
-    }
-
-    /// The reported case: an old duplicate must not beat a newer one merely by
-    /// being asked about first.
-    func testTheMostRecentlyModifiedItemWins() {
-        let old = Date(timeIntervalSince1970: 1_000)
-        let new = Date(timeIntervalSince1970: 2_000)
-        let winner = KeychainItem.winner(among: [
-            item(ref: "old", modified: old),
-            item(ref: "new", modified: new)
-        ])
-        XCTAssertEqual(winner?.persistentRef, Data("new".utf8))
-        XCTAssertEqual(winner?.modifiedAt, new)
-    }
-
-    /// Order in the array must not decide it — that is exactly the bug being
-    /// replaced, moved into this function instead of out of it.
-    func testOrderInTheArrayDoesNotDecideIt() {
-        let old = Date(timeIntervalSince1970: 1_000)
-        let new = Date(timeIntervalSince1970: 2_000)
-        let winner = KeychainItem.winner(among: [
-            item(ref: "new", modified: new),
-            item(ref: "old", modified: old)
-        ])
-        XCTAssertEqual(winner?.persistentRef, Data("new".utf8))
-    }
-
-    /// The single-item case, which is nearly everyone: one duplicate is still
-    /// a field of one to win.
-    func testASingleItemWinsByDefault() {
-        let winner = KeychainItem.winner(among: [item(ref: "only", modified: Date())])
-        XCTAssertEqual(winner?.persistentRef, Data("only".utf8))
-    }
-
-    func testNoItemsMeansNoWinner() {
-        XCTAssertNil(KeychainItem.winner(among: []))
-    }
-
-    /// A duplicate with no recorded modification date is worth keeping, not
-    /// discarding — `.distantPast` only ranks it against the others.
-    func testAnUndatedDuplicateStillLosesToADatedOne() {
-        let dated = Date(timeIntervalSince1970: 1_000)
-        let winner = KeychainItem.winner(among: [
-            item(ref: "undated", modified: nil),
-            item(ref: "dated", modified: dated)
-        ])
-        XCTAssertEqual(winner?.persistentRef, Data("dated".utf8))
-    }
-
-    /// But it can still win outright if it is the only one there is.
-    func testAnUndatedDuplicateWinsWhenAloneWithNoDateAtAll() {
-        let winner = KeychainItem.winner(among: [item(ref: "only", modified: nil)])
-        XCTAssertEqual(winner?.persistentRef, Data("only".utf8))
-        XCTAssertNil(winner?.modifiedAt)
-    }
-
-    /// An entry with no persistent reference at all cannot be read later no
-    /// matter how it ranks, so it is dropped rather than allowed to win and
-    /// then fail.
-    func testAnItemWithNoPersistentRefIsNeverThePick() {
-        let broken: [CFString: Any] = [kSecAttrModificationDate: Date(timeIntervalSince1970: 9_999)]
-        let winner = KeychainItem.winner(among: [
-            broken,
-            item(ref: "usable", modified: Date(timeIntervalSince1970: 1))
-        ])
-        XCTAssertEqual(winner?.persistentRef, Data("usable".utf8))
-    }
-}

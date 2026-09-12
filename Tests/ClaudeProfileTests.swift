@@ -29,7 +29,6 @@ final class ClaudeProfileTests: XCTestCase {
         XCTAssertNil(profile.slug)
         XCTAssertEqual(profile.id, "claude")
         XCTAssertEqual(profile.displayName, "Claude")
-        XCTAssertEqual(profile.keychainService, "Claude Code-credentials")
         XCTAssertEqual(profile.sessionsDirectory.path, "/Users/vinz/.claude/sessions")
         XCTAssertEqual(profile.sourceName, "Claude Code")
         XCTAssertEqual(profile.signInCommand, "claude")
@@ -41,25 +40,6 @@ final class ClaudeProfileTests: XCTestCase {
         XCTAssertEqual(profile.id, "claude-work")
         XCTAssertEqual(profile.displayName, "Claude (work)")
         XCTAssertEqual(profile.sessionsDirectory.path, "/Users/vinz/.claude-work/sessions")
-    }
-
-    /// Claude Code files a non-default profile's token under the service name
-    /// plus the first eight hex digits of the SHA-256 of the directory path.
-    /// Getting this wrong means "sign in" on a ring for an account that is
-    /// signed in.
-    func testTheKeychainServiceCarriesClaudeCodesHashOfThePath() {
-        let profile = ClaudeProfile(slug: "work",
-                                    configDirectory: URL(fileURLWithPath: "/Users/vinz/.claude-work"))
-        // `shasum -a 256` of the path, no trailing slash, no newline.
-        XCTAssertEqual(profile.keychainService, "Claude Code-credentials-19914660")
-    }
-
-    /// The path is hashed as Claude Code sees it, and Claude Code does not see
-    /// a trailing slash.
-    func testATrailingSlashDoesNotChangeTheHash() {
-        let slashed = ClaudeProfile(slug: "work",
-                                    configDirectory: URL(fileURLWithPath: "/Users/vinz/.claude-work/"))
-        XCTAssertEqual(slashed.keychainService, "Claude Code-credentials-19914660")
     }
 
     func testProviderIDsAreRecognised() {
@@ -148,14 +128,6 @@ final class ClaudeProfileTests: XCTestCase {
                        "Sign in to Claude Code in ~/.claude-work to read your usage")
     }
 
-    /// Every profile's token is a keychain item, so every profile can be
-    /// refused and needs the "Allow access…" button.
-    func testEveryProfileUsesTheKeychain() {
-        let summary = ProviderSummary(id: "claude-work", name: "Claude (work)", glyph: .claude,
-                                      account: nil, signIn: .guidance("x"))
-        XCTAssertTrue(summary.usesKeychain)
-    }
-
     /// The rate limit is per account. A penalty on the work profile must not
     /// hold the personal one back, and the default keeps its old key so a
     /// penalty in progress survives the update.
@@ -188,10 +160,9 @@ final class ClaudeProfileTests: XCTestCase {
         let home = URL(fileURLWithPath: "/Users/vinz")
         let store = UsageStore(
             providers: [
-                ClaudeOAuthProvider(profile: .default(home: home), archive: UsageArchive(defaults: defaults)),
-                ClaudeOAuthProvider(profile: ClaudeProfile(slug: "work",
-                                                           configDirectory: home.appendingPathComponent(".claude-work")),
-                                    archive: UsageArchive(defaults: defaults))
+                ClaudeCLIProvider(profile: .default(home: home)),
+                ClaudeCLIProvider(profile: ClaudeProfile(slug: "work",
+                                                        configDirectory: home.appendingPathComponent(".claude-work")))
             ],
             archive: UsageArchive(defaults: defaults)
         )

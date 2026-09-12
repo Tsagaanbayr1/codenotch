@@ -33,28 +33,23 @@ protocol UsageProvider {
     /// route matters as much as this call. A requirement, not an extension
     /// member, for the reason spelled out above `account()`.
     func presentSignIn()
-    /// Drop any credential held in memory, so the next read goes to the
-    /// keychain for real.
-    ///
-    /// Without this, "ask me again" does nothing whenever a valid token is
-    /// still cached: the read is served from memory, macOS is never consulted,
-    /// and no prompt appears. A requirement, not an extension member, for the
-    /// reason spelled out above `account()`.
-    func forgetCachedCredential()
 }
 
 enum UsageProviderError: Error {
     /// No usable credential — the user has to sign in again.
+    ///
+    /// Always the owning tool's credential, never one of ours: Codenotch reads
+    /// none. This is what "that tool is not signed in" looks like from here.
     case needsAuth
-    /// The credential is there, and macOS refused to hand it over — the
-    /// keychain prompt was declined. Not the same as being signed out: telling
-    /// someone to sign in, when they are signed in and merely pressed Deny,
-    /// sends them to fix something that is not broken.
-    case accessDenied
-    /// The credential is there but has expired, and the app that owns it will
-    /// refresh it the next time it runs. Not the same as being signed out: the
-    /// last reading is still true, just old.
-    case credentialExpired
+    /// The tool answered before and is not answering now — it was quit, or
+    /// restarted onto a different port. Not the same as being signed out, and
+    /// not the same as being gone: the last reading is still true, just old, so
+    /// the store ages it rather than discarding it.
+    ///
+    /// Named for the condition, not for a credential. It was `credentialExpired`
+    /// while the app still read tokens; it never reads one now, so a name about
+    /// expiry would describe something that cannot happen.
+    case notAnswering
     /// The endpoint answered, but not with anything we understand.
     case badResponse(status: Int)
     /// Asked to slow down. Carries the server's own retry hint when it gave one.
@@ -63,4 +58,11 @@ enum UsageProviderError: Error {
     /// Cursor's free plan reports an included limit of zero. Not an error, and
     /// it must not be shown as one.
     case nothingMetered(String)
+    /// The tool this provider borrows its numbers from is not installed, or no
+    /// longer answers in a shape we understand. Distinct from `needsAuth`,
+    /// which means the tool is there and signed out: telling someone to sign in
+    /// when the CLI is simply missing sends them to fix the wrong thing. Like
+    /// `nothingMetered`, it supersedes any remembered reading — a number we can
+    /// no longer re-read is a number we should stop showing.
+    case unavailable(String)
 }

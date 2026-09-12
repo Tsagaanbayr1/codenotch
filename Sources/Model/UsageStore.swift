@@ -9,14 +9,11 @@ final class UsageStore: ObservableObject {
     @Published private(set) var snapshots: [ProviderSnapshot] = []
     /// Providers with a fetch in flight, so the cell can show it happening.
     @Published private(set) var refreshing: Set<String> = []
-    /// Providers whose last fetch was refused by macOS, cleared as soon as one
-    /// succeeds. The settings row's only honest basis for offering to ask again.
-    @Published private(set) var refusedAccess: Set<String> = []
-
     private let providers: [UsageProvider]
-    /// Providers the user has switched off. They are not fetched at all — their
-    /// credential is never read, which is the whole point of switching one off.
-    /// Filtering the results afterwards would still touch the keychain.
+    /// Providers the user has switched off. They are not fetched at all — the
+    /// tool behind them is never run and its files never opened, which is the
+    /// whole point of switching one off. Filtering the results afterwards would
+    /// still have done the work.
     @Published var disconnected: Set<String> = [] {
         didSet {
             guard disconnected != oldValue else { return }
@@ -48,7 +45,20 @@ final class UsageStore: ObservableObject {
     /// those attempts to have genuinely failed before the ring says so; it
     /// must never fire merely because the idle schedule hasn't come round yet.
     private let staleAfter: TimeInterval
+    /// How often to look while something is running.
+    ///
+    /// Five minutes, not the every-tick poll this used to do. A reading is no
+    /// longer a request — `ClaudeCLIProvider` spawns Claude Code and
+    /// `CodexLocalProvider` spawns Codex, seconds of real CPU each — and a
+    /// number that moves by a percentage point an hour does not repay doing
+    /// that every minute on battery. Nothing is lost at the moment it matters:
+    /// opening the notch and clicking a ring both refresh immediately, and
+    /// `refresh(providerID:)` deliberately bypasses this schedule.
+    private let busyRefreshInterval: TimeInterval
     /// How often to look when nothing is running.
+    ///
+    /// Longer again, because usage cannot move while nothing is running: the
+    /// only thing an idle poll can discover is a window having rolled over.
     private let idleRefreshInterval: TimeInterval
     private var lastAttempt: Date?
 
@@ -64,13 +74,15 @@ final class UsageStore: ObservableObject {
     init(
         providers: [UsageProvider],
         refreshInterval: TimeInterval = 60,
-        idleRefreshInterval: TimeInterval = 5 * 60,
-        staleAfter: TimeInterval = 15 * 60,
+        busyRefreshInterval: TimeInterval = 5 * 60,
+        idleRefreshInterval: TimeInterval = 15 * 60,
+        staleAfter: TimeInterval = 45 * 60,
         archive: UsageArchive = UsageArchive(),
         disconnected: Set<String> = []
     ) {
         self.providers = providers
         self.refreshInterval = refreshInterval
+        self.busyRefreshInterval = busyRefreshInterval
         self.idleRefreshInterval = idleRefreshInterval
         self.staleAfter = staleAfter
         self.archive = archive
@@ -109,8 +121,7 @@ final class UsageStore: ObservableObject {
         providers.map { provider in
             ProviderSummary(id: provider.id, name: provider.displayName,
                             glyph: provider.glyph, account: provider.account(),
-                            signIn: provider.signInRoute,
-                            wasRefusedAccess: refusedAccess.contains(provider.id))
+                            signIn: provider.signInRoute)
         }
     }
 
@@ -149,19 +160,41 @@ final class UsageStore: ObservableObject {
         guard Self.shouldRefresh(
             isBusy: isBusy(),
             sinceLastAttempt: waited,
+            busyInterval: busyRefreshInterval,
             idleInterval: idleRefreshInterval
         ) else { return }
         refreshNow()
     }
 
-    /// Poll at full rate while something is running; otherwise wait out the
-    /// idle interval. Pure, so the schedule can be tested without a clock.
+    /// Wait out the busy interval while something is running, the longer idle
+    /// one otherwise. Pure, so the schedule can be tested without a clock.
+    ///
+    /// Being busy no longer means polling on every tick. It used to, back when
+    /// a reading was one HTTPS request; now each one spawns the vendor's CLI,
+    /// and a session left running overnight would have spent the night
+    /// launching Claude Code once a minute to be told the same number.
     static func shouldRefresh(
         isBusy: Bool,
         sinceLastAttempt: TimeInterval,
+        busyInterval: TimeInterval,
         idleInterval: TimeInterval
     ) -> Bool {
-        isBusy || sinceLastAttempt >= idleInterval
+        sinceLastAttempt >= (isBusy ? busyInterval : idleInterval)
+    }
+
+    /// Refresh because the user just opened the notch — but only if the reading
+    /// has had time to move.
+    ///
+    /// The notch unfolds on hover, which happens dozens of times an hour by
+    /// accident. Every reading now spawns a vendor CLI, so an unconditional
+    /// refresh here would turn a pointer crossing the top of the screen into
+    /// seconds of CPU. The window is short enough that anyone who opens the
+    /// notch *to check* sees a fresh number, and long enough that brushing past
+    /// it repeatedly costs nothing.
+    func refreshOnOpen(notWithin window: TimeInterval = 60) {
+        let waited = lastAttempt.map { Date().timeIntervalSince($0) } ?? .greatestFiniteMagnitude
+        guard waited >= window else { return }
+        refreshNow()
     }
 
     func refreshNow() {
@@ -257,17 +290,6 @@ final class UsageStore: ObservableObject {
         return openAccountSource(providerID: providerID)
     }
 
-    /// Ask macOS for this provider's credential again.
-    ///
-    /// The remedy for a declined keychain prompt. Dropping the in-memory copy
-    /// first is the part that matters: a plain refresh is served from the cache
-    /// whenever the token is still valid, so the keychain is never touched and
-    /// the prompt never returns — the button would appear to do nothing.
-    func reauthorize(providerID: String) {
-        providers.first { $0.id == providerID }?.forgetCachedCredential()
-        refresh(providerID: providerID)
-    }
-
     /// Take the user to where this provider's account is *changed*.
     ///
     /// Same destination as signing in, but unconditional: switching accounts is
@@ -302,7 +324,6 @@ final class UsageStore: ObservableObject {
             let fresh = try await provider.fetchSnapshot()
             lastGood[provider.id] = (fresh, Date())
             archive.save(lastGood)
-            refusedAccess.remove(provider.id)
             Log.usage.debug("\(provider.id, privacy: .public): \(fresh.windows.count) window(s)")
             return fresh
         } catch {
@@ -315,18 +336,6 @@ final class UsageStore: ObservableObject {
     /// one marked stale, or shows the cell with no reading at all.
     private func degraded(provider: UsageProvider, error: Error) -> ProviderSnapshot {
         let status = Self.status(for: error)
-
-        // Remembered apart from the snapshot on purpose. The snapshot answers
-        // "how good are the numbers I am showing", and for a refusal the honest
-        // answer is "still fine, just ageing" — which is why `supersedesHistory`
-        // keeps the old reading and its status. That deliberately loses the one
-        // fact the settings row needs: whether macOS let us in last time. Two
-        // different questions, so two different places to keep the answer.
-        if case .accessDenied = status {
-            refusedAccess.insert(provider.id)
-        } else {
-            refusedAccess.remove(provider.id)
-        }
 
         // Some failures are statements about the account rather than a hiccup:
         // signed out, or a plan that meters nothing. Re-showing an old reading
@@ -360,10 +369,6 @@ final class UsageStore: ObservableObject {
     static func supersedesHistory(_ status: ProviderStatus) -> Bool {
         switch status {
         case .needsAuth, .unsupported: return true
-        // A refusal says nothing about the reading — the credential is there
-        // and still valid, we were simply not let in to re-read it. Discarding
-        // the last number would punish someone for pressing the wrong button.
-        case .accessDenied:            return false
         case .ok, .stale, .error:      return false
         }
     }
@@ -376,23 +381,23 @@ final class UsageStore: ObservableObject {
     /// supposed to keep, without re-typing the numbers on both sides.
     var staleAfterForTesting: TimeInterval { staleAfter }
     var idleRefreshIntervalForTesting: TimeInterval { idleRefreshInterval }
+    var busyRefreshIntervalForTesting: TimeInterval { busyRefreshInterval }
 
     private static func status(for error: Error) -> ProviderStatus {
         switch error {
         case UsageProviderError.needsAuth:
             return .needsAuth
-        case UsageProviderError.credentialExpired:
+        case UsageProviderError.notAnswering:
             // Ages the reading rather than discarding it: the number was true
-            // when it was taken, and the token will refresh itself in the
-            // ordinary course of using the app that owns it.
+            // when it was taken, and the tool will answer again the next time
+            // it is running.
             return .stale(since: Date())
         case UsageProviderError.rateLimited:
             // Not an error the user can do anything about, and the last good
             // reading is still roughly true, so it reads as staleness.
             return .stale(since: Date())
-        case UsageProviderError.accessDenied:
-            return .accessDenied
-        case UsageProviderError.nothingMetered(let why):
+        case UsageProviderError.nothingMetered(let why),
+             UsageProviderError.unavailable(let why):
             return .unsupported(why)
         case UsageProviderError.badResponse(let code):
             return .error("HTTP \(code)")

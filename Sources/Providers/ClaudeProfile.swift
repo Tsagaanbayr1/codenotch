@@ -1,4 +1,3 @@
-import CryptoKit
 import Foundation
 
 /// One Claude Code configuration directory, and so one account.
@@ -11,9 +10,13 @@ import Foundation
 /// one of those accounts and was blind to the others: a work session never
 /// spun the ring, and the work limit was never drawn at all.
 ///
-/// A profile is the *convention* `~/.claude-<slug>`, not the environment
-/// variable: the app is launched from Finder, so the alias's variable never
-/// reaches it, and the directories are the only trace the profiles leave.
+/// A profile is *discovered* by the convention `~/.claude-<slug>`, never by the
+/// environment variable: the app is launched from Finder, so the alias's
+/// variable never reaches it, and the directories are the only trace the
+/// profiles leave. Once found, the directory is handed back to Claude Code as
+/// `CLAUDE_CONFIG_DIR` whenever `ClaudeCLI` asks it for a reading — the same
+/// mechanism the alias uses, which is what makes the two agree on whose limits
+/// are being shown.
 struct ClaudeProfile: Equatable, Hashable {
     /// The provider id the default profile has always had. Kept so archived
     /// readings, connection choices and the hover-band keys survive the change.
@@ -117,25 +120,6 @@ struct ClaudeProfile: Equatable, Hashable {
     /// Where Claude Code writes one file per running process.
     var sessionsDirectory: URL { configDirectory.appendingPathComponent("sessions") }
 
-    /// The keychain service the OAuth token is filed under.
-    ///
-    /// The default directory uses the bare name. Any other `CLAUDE_CONFIG_DIR`
-    /// gets a suffix so two profiles cannot overwrite each other's token: the
-    /// first eight hex digits of the SHA-256 of the directory's absolute path,
-    /// no trailing slash. That is Claude Code's rule, not ours — it is what
-    /// makes `Claude Code-credentials-1c731050` findable at all.
-    var keychainService: String {
-        guard slug != nil else { return Self.defaultKeychainService }
-        return "\(Self.defaultKeychainService)-\(Self.keychainSuffix(forPath: configDirectory.path))"
-    }
-
-    static let defaultKeychainService = "Claude Code-credentials"
-
-    static func keychainSuffix(forPath path: String) -> String {
-        let digest = SHA256.hash(data: Data(path.utf8))
-        return digest.map { String(format: "%02x", $0) }.joined().prefix(8).description
-    }
-
     // MARK: - Copy
 
     /// Which tool the credential is borrowed from, said so that two Claude rows
@@ -147,5 +131,20 @@ struct ClaudeProfile: Equatable, Hashable {
     /// The command that signs this profile in, for the row that has no button.
     var signInCommand: String {
         slug == nil ? "claude" : "CLAUDE_CONFIG_DIR=\(displayPath) claude"
+    }
+
+    /// What `CLAUDE_CONFIG_DIR` must be for a child `claude` to read *this*
+    /// profile — and nil for the default, which needs it **unset**.
+    ///
+    /// Setting it to `~/.claude` is not the no-op it looks like. Claude Code
+    /// keeps the default profile's account details in `~/.claude.json`, beside
+    /// the directory; naming the directory explicitly moves that lookup inside
+    /// it, to a `~/.claude/.claude.json` that holds machine settings and no
+    /// account at all. Claude Code then cannot see the subscription, and
+    /// `/usage` answers with a cost summary — an entirely believable printout
+    /// that says nothing about limits. The reading was lost for the default
+    /// profile, which is nearly everyone, and lost *quietly*.
+    var configDirectoryOverride: String? {
+        slug == nil ? nil : configDirectory.path
     }
 }

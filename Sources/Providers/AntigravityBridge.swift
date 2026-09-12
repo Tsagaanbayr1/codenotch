@@ -163,10 +163,26 @@ enum AntigravityBridge {
                     // "Weekly Limit Remaining", which is the same for both.
                     label: group.displayName ?? bucket.displayName ?? "Usage",
                     usedFraction: 1 - remaining,
-                    resetsAt: bucket.resetTime.flatMap(AntigravityCredentials.parse)
+                    resetsAt: bucket.resetTime.flatMap(resetDate)
                 )
             }
         }
+    }
+
+    /// `2026-08-31T21:53:49.575961+07:00` — RFC 3339 with an offset, not UTC.
+    ///
+    /// Fractional seconds are not optional in this field, but a formatter that
+    /// demands them fails on a whole-second timestamp, so both are tried. Lived
+    /// on `AntigravityCredentials` until the keychain read went away; the
+    /// timestamps it parses were always the language server's, not the token's.
+    static func resetDate(_ value: String) -> Date? {
+        let withFraction = ISO8601DateFormatter()
+        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = withFraction.date(from: value) { return date }
+
+        let plain = ISO8601DateFormatter()
+        plain.formatOptions = [.withInternetDateTime]
+        return plain.date(from: value)
     }
 
     // MARK: - Plumbing

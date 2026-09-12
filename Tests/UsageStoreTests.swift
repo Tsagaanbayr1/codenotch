@@ -2,132 +2,10 @@ import SQLite3
 import XCTest
 @testable import Codenotch
 
-/// Guards the shape of `GET /api/oauth/usage`. It is not a published API, so
-/// these are the tests that will fail first if Anthropic changes it.
-final class UsageResponseTests: XCTestCase {
-    private func decode(_ json: String) throws -> UsageResponse {
-        let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        decoder.dateDecodingStrategy = .custom { decoder in
-            let text = try decoder.singleValueContainer().decode(String.self)
-            guard let date = formatter.date(from: text) else {
-                throw DecodingError.dataCorrupted(
-                    .init(codingPath: decoder.codingPath, debugDescription: text)
-                )
-            }
-            return date
-        }
-        return try decoder.decode(UsageResponse.self, from: Data(json.utf8))
-    }
-
-    /// Trimmed from a real response — the endpoint returns a long tail of
-    /// null-valued keys that must not trip decoding.
-    private let live = """
-    {
-      "five_hour": { "utilization": 52.0, "resets_at": "2026-08-28T09:50:00.316290+00:00",
-                     "limit_dollars": null, "used_dollars": null },
-      "seven_day": { "utilization": 17.0, "resets_at": "2026-09-02T17:00:00.316321+00:00",
-                     "limit_dollars": null },
-      "seven_day_opus": null,
-      "nimbus_quill": { "utilization": 0.0, "resets_at": null },
-      "limits": [
-        { "kind": "session", "group": "session", "percent": 52, "severity": "normal",
-          "resets_at": "2026-08-28T09:50:00.316290+00:00", "scope": null, "is_active": true },
-        { "kind": "weekly_all", "group": "weekly", "percent": 17, "severity": "normal",
-          "resets_at": "2026-09-02T17:00:00.316321+00:00", "scope": null, "is_active": false }
-      ]
-    }
-    """
-
-    func testDecodesTheLiveShape() throws {
-        let windows = try decode(live).limitWindows()
-        XCTAssertEqual(windows.count, 2)
-        XCTAssertEqual(windows[0].id, "session")
-        XCTAssertEqual(windows[0].label, "Current session")
-        XCTAssertEqual(windows[0].usedFraction ?? -1, 0.52, accuracy: 0.0001)
-        XCTAssertEqual(windows[1].label, "All models")
-        XCTAssertEqual(windows[1].usedFraction ?? -1, 0.17, accuracy: 0.0001)
-    }
-
-    /// The session window always sorts above the weekly one, whatever order the
-    /// endpoint lists them in — that is the order the design frame draws.
-    func testSessionSortsFirst() throws {
-        let reversed = """
-        { "limits": [
-            { "kind": "weekly_all", "percent": 17, "resets_at": "2026-09-02T17:00:00.316321+00:00" },
-            { "kind": "session", "percent": 52, "resets_at": "2026-08-28T09:50:00.316290+00:00" } ] }
-        """
-        XCTAssertEqual(try decode(reversed).limitWindows().map(\.id), ["session", "weekly_all"])
-    }
-
-    /// A window with no reset time is not a window we can render a countdown
-    /// for, so it is dropped rather than shown with a bogus date.
-    func testDropsWindowsWithoutAResetTime() throws {
-        let json = """
-        { "limits": [ { "kind": "session", "percent": 5, "resets_at": null } ],
-          "five_hour": { "utilization": 5.0, "resets_at": null } }
-        """
-        XCTAssertTrue(try decode(json).limitWindows().isEmpty)
-    }
-
-    /// Older responses without `limits` still render from the named windows.
-    func testFallsBackToTheNamedWindows() throws {
-        let json = """
-        { "five_hour": { "utilization": 48.0, "resets_at": "2026-08-28T09:50:00.316290+00:00" },
-          "seven_day": { "utilization": 16.0, "resets_at": "2026-09-02T17:00:00.316321+00:00" } }
-        """
-        let windows = try decode(json).limitWindows()
-        XCTAssertEqual(windows.map(\.label), ["Current session", "All models"])
-    }
-
-    func testUnknownKindsGetAReadableLabel() {
-        XCTAssertEqual(UsageResponse.label(forKind: "weekly_opus"), "Opus")
-        XCTAssertEqual(UsageResponse.label(forKind: "weekly_cowork"), "Cowork")
-    }
-}
-
-/// The endpoint rate-limits, and a poll that keeps firing into a 429 is how you
-/// stay rate-limited. These pin the back-off inputs.
-final class RateLimitTests: XCTestCase {
-    private func response(retryAfter: String?) -> HTTPURLResponse {
-        HTTPURLResponse(
-            url: URL(string: "https://api.anthropic.com/api/oauth/usage")!,
-            statusCode: 429,
-            httpVersion: nil,
-            headerFields: retryAfter.map { ["Retry-After": $0] }
-        )!
-    }
-
-    func testReadsRetryAfterInSeconds() {
-        XCTAssertEqual(ClaudeOAuthProvider.retryAfter(from: response(retryAfter: "120")), 120)
-    }
-
-    func testReadsRetryAfterAsAnHTTPDate() throws {
-        let future = Date().addingTimeInterval(300)
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(identifier: "GMT")
-        formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
-        let parsed = try XCTUnwrap(
-            ClaudeOAuthProvider.retryAfter(from: response(retryAfter: formatter.string(from: future)))
-        )
-        XCTAssertEqual(parsed, 300, accuracy: 2)
-    }
-
-    func testMissingOrUnparseableHeaderFallsBackToTheDefault() {
-        XCTAssertNil(ClaudeOAuthProvider.retryAfter(from: response(retryAfter: nil)))
-        XCTAssertNil(ClaudeOAuthProvider.retryAfter(from: response(retryAfter: "soon")))
-    }
-
-    func testAPastDateNeverYieldsANegativeDelay() throws {
-        let delay = try XCTUnwrap(
-            ClaudeOAuthProvider.retryAfter(from: response(retryAfter: "Mon, 01 Jan 2001 00:00:00 GMT"))
-        )
-        XCTAssertEqual(delay, 0)
-    }
-
+/// A failed fetch is not one thing. What the store makes of each kind is the
+/// difference between dimming a still-true number and sending someone to fix
+/// something that is not broken.
+final class FailureStatusTests: XCTestCase {
     /// Being told to slow down is not a broken provider: the last good reading
     /// is still roughly true, so it reads as staleness rather than an error.
     @MainActor
@@ -193,29 +71,6 @@ final class UsageArchiveTests: XCTestCase {
     }
 }
 
-/// `Retry-After: 0` is the endpoint's actual answer, and obeying it literally is
-/// what keeps you rate limited.
-final class BackoffTests: XCTestCase {
-    func testAZeroHintStillWaitsAMinute() {
-        XCTAssertEqual(ClaudeOAuthProvider.backoff(forAttempt: 0, retryAfter: 0), 60)
-    }
-
-    func testItDoublesWhileTheLimitPersists() {
-        XCTAssertEqual(ClaudeOAuthProvider.backoff(forAttempt: 0, retryAfter: nil), 60)
-        XCTAssertEqual(ClaudeOAuthProvider.backoff(forAttempt: 1, retryAfter: nil), 120)
-        XCTAssertEqual(ClaudeOAuthProvider.backoff(forAttempt: 2, retryAfter: nil), 240)
-    }
-
-    func testItIsCappedSoItAlwaysRecovers() {
-        XCTAssertEqual(ClaudeOAuthProvider.backoff(forAttempt: 99, retryAfter: nil), 15 * 60)
-    }
-
-    /// A server that asks for longer than our own schedule gets its way.
-    func testAGenerousHintWins() {
-        XCTAssertEqual(ClaudeOAuthProvider.backoff(forAttempt: 0, retryAfter: 600), 600)
-    }
-}
-
 /// The back-off has to outlive the process, or a development loop of `make run`
 /// walks into the rate limit on every launch and keeps it alive.
 final class BackoffPersistenceTests: XCTestCase {
@@ -251,32 +106,42 @@ final class BackoffPersistenceTests: XCTestCase {
     }
 }
 
-/// Your usage cannot move while nothing is running, so polling hard through a
-/// quiet afternoon spends rate-limit budget re-reading an unchanged number.
+/// Every reading now spawns the vendor's own CLI, so the schedule is what keeps
+/// an ambient menu-bar app from costing seconds of CPU a minute. Usage also
+/// cannot move while nothing is running, so an idle poll waits longer still.
 final class RefreshScheduleTests: XCTestCase {
-    private let idle: TimeInterval = 5 * 60
+    private let busy: TimeInterval = 5 * 60
+    private let idle: TimeInterval = 15 * 60
 
     @MainActor
-    func testBusyAlwaysPolls() {
-        XCTAssertTrue(UsageStore.shouldRefresh(isBusy: true, sinceLastAttempt: 0, idleInterval: idle))
-        XCTAssertTrue(UsageStore.shouldRefresh(isBusy: true, sinceLastAttempt: 60, idleInterval: idle))
+    private func shouldRefresh(isBusy: Bool, after seconds: TimeInterval) -> Bool {
+        UsageStore.shouldRefresh(isBusy: isBusy, sinceLastAttempt: seconds,
+                                 busyInterval: busy, idleInterval: idle)
+    }
+
+    /// The regression this guards: being busy used to mean polling on every
+    /// tick. A session left running overnight then spent the night launching
+    /// Claude Code once a minute to be told the same number.
+    @MainActor
+    func testBusyStillWaitsOutItsInterval() {
+        XCTAssertFalse(shouldRefresh(isBusy: true, after: 0))
+        XCTAssertFalse(shouldRefresh(isBusy: true, after: 60))
+        XCTAssertFalse(shouldRefresh(isBusy: true, after: 299))
+        XCTAssertTrue(shouldRefresh(isBusy: true, after: 300))
     }
 
     @MainActor
     func testIdleWaitsOutTheLongerInterval() {
-        XCTAssertFalse(UsageStore.shouldRefresh(isBusy: false, sinceLastAttempt: 60, idleInterval: idle))
-        XCTAssertFalse(UsageStore.shouldRefresh(isBusy: false, sinceLastAttempt: 299, idleInterval: idle))
-        XCTAssertTrue(UsageStore.shouldRefresh(isBusy: false, sinceLastAttempt: 300, idleInterval: idle))
+        XCTAssertFalse(shouldRefresh(isBusy: false, after: 300))
+        XCTAssertFalse(shouldRefresh(isBusy: false, after: 899))
+        XCTAssertTrue(shouldRefresh(isBusy: false, after: 900))
     }
 
     /// A first run has never attempted anything and must not be held back.
     @MainActor
     func testTheFirstAttemptIsNeverDeferred() {
-        XCTAssertTrue(UsageStore.shouldRefresh(
-            isBusy: false,
-            sinceLastAttempt: .greatestFiniteMagnitude,
-            idleInterval: idle
-        ))
+        XCTAssertTrue(shouldRefresh(isBusy: false, after: .greatestFiniteMagnitude))
+        XCTAssertTrue(shouldRefresh(isBusy: true, after: .greatestFiniteMagnitude))
     }
 }
 
@@ -300,49 +165,9 @@ final class SupersedingStatusTests: XCTestCase {
     }
 }
 
-/// Claude Code's own schema says a window is "present only while the API reports
-/// it and its resets_at has not passed" — so the session entry vanishes from
-/// `limits` the moment it rolls over. That is precisely when someone looks.
-final class ResetWindowTests: XCTestCase {
-    private func decode(_ json: String) throws -> UsageResponse {
-        let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        decoder.dateDecodingStrategy = .custom { decoder in
-            let text = try decoder.singleValueContainer().decode(String.self)
-            guard let date = formatter.date(from: text) else {
-                throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: text))
-            }
-            return date
-        }
-        return try decoder.decode(UsageResponse.self, from: Data(json.utf8))
-    }
-
-    /// The reported failure: with the session gone from `limits`, the weekly slid
-    /// into first place and the ring quietly started meaning something else.
-    func testSessionSurvivesWhenItDropsOutOfLimits() throws {
-        let json = """
-        { "five_hour": { "utilization": 0.0, "resets_at": "2026-08-29T18:39:59.636345+00:00" },
-          "seven_day": { "utilization": 33.0, "resets_at": "2026-09-02T16:59:59.636373+00:00" },
-          "limits": [ { "kind": "weekly_all", "percent": 33,
-                        "resets_at": "2026-09-02T16:59:59.636373+00:00" } ] }
-        """
-        let windows = try decode(json).limitWindows()
-        XCTAssertEqual(windows.map(\.id), ["session", "weekly_all"])
-        XCTAssertEqual(windows[0].usedFraction ?? -1, 0, accuracy: 0.0001)
-    }
-
-    /// `limits` still wins where it has the window — it carries more detail.
-    func testLimitsAreNotDuplicatedByTheNamedWindows() throws {
-        let json = """
-        { "five_hour": { "utilization": 23.0, "resets_at": "2026-08-29T13:39:59.636345+00:00" },
-          "limits": [ { "kind": "session", "percent": 23,
-                        "resets_at": "2026-08-29T13:39:59.636345+00:00" } ] }
-        """
-        XCTAssertEqual(try decode(json).limitWindows().map(\.id), ["session"])
-    }
-
+/// The ring means one declared window, never "whichever came first". A window
+/// dropping out of a reading must not silently promote another into its place.
+final class HeadlineWindowTests: XCTestCase {
     /// If the session is genuinely absent everywhere, the cell shows nothing
     /// rather than promoting the weekly into its place.
     func testAMissingHeadlineShowsNoReadingRatherThanAnotherWindow() {
@@ -441,15 +266,16 @@ final class SingleProviderRefreshTests: XCTestCase {
     }
 }
 
-/// Overnight the Claude token ages out, because this app deliberately does not
-/// refresh a credential it does not own — Claude Code rotates it whenever it
-/// next runs. What must not happen is the notch demanding a sign-in for a token
+/// A tool that is simply closed is not an account that is gone. Antigravity's
+/// language server disappears the moment its window does, and its port changes
+/// on every launch — so failing to reach it is the ordinary evening, not a
+/// fault. What must not happen is the notch demanding a sign-in for a reading
 /// that is merely old.
 @MainActor
-final class ExpiredCredentialTests: XCTestCase {
-    func testAnExpiredTokenAgesTheReadingRatherThanClearingIt() {
-        let status = UsageStore.statusForTesting(UsageProviderError.credentialExpired)
-        XCTAssertTrue(status.isStale, "an expired token should read as stale, not as an error")
+final class NotAnsweringTests: XCTestCase {
+    func testAQuietToolAgesTheReadingRatherThanClearingIt() {
+        let status = UsageStore.statusForTesting(UsageProviderError.notAnswering)
+        XCTAssertTrue(status.isStale, "a tool that is merely closed should read as stale, not as an error")
         XCTAssertFalse(UsageStore.supersedesHistory(status),
                        "the last reading is old, not false — it must survive")
     }

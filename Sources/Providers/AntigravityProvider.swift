@@ -3,17 +3,24 @@ import os
 
 /// Gemini, as Antigravity sees it.
 ///
-/// **What this can and cannot report, and why.** Antigravity talks to Google's
-/// Cloud Code backend, and the only call that describes the account is
-/// `:loadCodeAssist`. It answers with tiers — which plan you are on and which
-/// you are not eligible for — and no numbers: no used, no limit, no reset. A
-/// packet capture of a signed-in install showed exactly two RPCs, and neither
-/// carries a quota.
+/// **Everything here is local.** This used to read Antigravity's OAuth token
+/// out of the login keychain and call Google with it. It no longer reads any
+/// credential at all — the last one in the app — so nothing Codenotch does can
+/// raise a keychain prompt, and there is no secret of anyone else's in this
+/// process.
 ///
-/// So this provider reports the account honestly and says there is nothing
-/// metered, rather than inventing a ring. That is the same answer Cursor's free
-/// plan gets, and for the same reason: a confident 0% is worse than an admitted
-/// blank, especially in something people pay for.
+/// What replaces it is what was already the *preferred* source: Antigravity's
+/// own language server, running on this machine, which holds the credential and
+/// the client identity Google insists on and answers with the same figure
+/// Antigravity's own panel shows. See `AntigravityBridge` — Antigravity does
+/// not call Google for this either.
+///
+/// What that costs is the direct `:retrieveUserQuotaSummary` call, which needed
+/// the token and only ever answered for a licensed account; the language server
+/// outranked it whenever both could answer. Where neither can, the honest
+/// remainder is a local request *count* — never a percentage, because Google
+/// publishes no limit to divide by, and a confident 0% is worse than an
+/// admitted blank in something people pay for.
 actor AntigravityProvider: UsageProvider {
     nonisolated let id = "gemini"
     // The id stays `gemini`: it keys the archive and the user's connection
@@ -21,14 +28,8 @@ actor AntigravityProvider: UsageProvider {
     nonisolated let displayName = "Antigravity"
     nonisolated let glyph = ProviderGlyph.antigravity
 
-    /// The production host. Antigravity itself also calls a `daily-` variant,
-    /// which answers 403 to this token — so it is not a fallback, it is a
-    /// different audience.
-    private let endpoint = URL(string: "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist")!
-    /// The real usage figure — when the account is allowed to ask for it.
-    private let quotaEndpoint = URL(string: "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary")!
-    private let session: URLSession
-    /// A second session, trusting loopback only, for the local language server.
+    /// Trusts loopback only. It is the sole network session this provider has,
+    /// and it never leaves the machine.
     private let localSession: URLSession
     /// Re-discovering the port and token means spawning `ps` and `lsof`, which
     /// is not something to do every minute. Cached until it stops working.
@@ -42,8 +43,7 @@ actor AntigravityProvider: UsageProvider {
     /// rather than degraded.
     private var everBridged = false
 
-    init(session: URLSession = .shared) {
-        self.session = session
+    init() {
         self.localSession = URLSession(configuration: .ephemeral,
                                        delegate: LocalhostTrust(),
                                        delegateQueue: nil)
@@ -53,58 +53,30 @@ actor AntigravityProvider: UsageProvider {
         .openApp(bundleID: "com.google.antigravity", name: "Antigravity")
     }
 
-    nonisolated func forgetCachedCredential() { AntigravityCredentials.forgetCached() }
-
+    /// Whose readings these are — as far as anything local can say.
+    ///
+    /// The plan used to come off the token's `auth_method`. Nothing local
+    /// carries it, so the row now says only which tool the numbers are borrowed
+    /// from. That is a real loss and the right trade: the alternative is
+    /// opening someone's credential to print one word.
+    ///
+    /// Antigravity having actually run here is the evidence that there is an
+    /// account at all — it writes these transcripts on first use.
     nonisolated func account() -> ProviderAccount? {
-        guard let credentials = try? AntigravityCredentials.load() else { return nil }
+        guard FileManager.default.fileExists(atPath: AntigravityActivity.transcriptRoot.path)
+        else { return nil }
         return ProviderAccount(
-            label: nil,   // the token carries no address
-            plan: credentials.authMethod == "consumer" ? "Personal" : credentials.authMethod,
+            label: nil,   // nothing local carries the address
+            plan: nil,    // nor the plan
             source: "Antigravity",
             manageURL: URL(string: "https://antigravity.google")
         )
     }
 
     func fetchSnapshot() async throws -> ProviderSnapshot {
-        let credentials = try AntigravityCredentials.load()
-        // Expired is not signed out: Antigravity refreshes this on its own the
-        // next time it runs, and the last reading is still true, just old.
-        if credentials.isExpired { throw UsageProviderError.credentialExpired }
-
-        var request = URLRequest(url: endpoint)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(credentials.accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        // `GEMINI` and not `ANTIGRAVITY`: the latter is rejected outright with
-        // "Invalid value at 'metadata.plugin_type'". The wire name lags the
-        // product name.
-        request.httpBody = try JSONSerialization.data(
-            withJSONObject: ["metadata": ["pluginType": "GEMINI"]]
-        )
-        request.timeoutInterval = 15
-
-        let (data, response) = try await session.data(for: request)
-        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-
-        if status == 401 {
-            // Same reasoning as Claude's: rejected but unexpired means the
-            // account underneath has changed.
-            AntigravityCredentials.forgetCached()
-            throw UsageProviderError.needsAuth
-        }
-        if status == 403 { throw UsageProviderError.needsAuth }
-        if status == 429 {
-            let retry = (response as? HTTPURLResponse)?
-                .value(forHTTPHeaderField: "Retry-After").flatMap(TimeInterval.init)
-            throw UsageProviderError.rateLimited(retryAfter: retry ?? 0)
-        }
-        guard status == 200 else { throw UsageProviderError.badResponse(status: status) }
-
-        let tier = Self.tier(in: data)
-
-        // Antigravity's own language server first: it holds the client identity
-        // Google insists on, and answers with the same figure the app's own
-        // usage panel shows.
+        // Antigravity's own language server, and now only that. It answers with
+        // the figure Antigravity's own panel shows, and it needs nothing from
+        // us — no token, no keychain, no prompt.
         if let windows = await localQuota(), !windows.isEmpty {
             everBridged = true
             return ProviderSnapshot(id: id, displayName: displayName, glyph: glyph,
@@ -114,23 +86,19 @@ actor AntigravityProvider: UsageProvider {
 
         // Antigravity has answered before and is not answering now: keep the
         // last percentage, dimmed and dated, rather than swapping in a count.
-        // `credentialExpired` is the store's word for "still true, just old".
-        if everBridged { throw UsageProviderError.credentialExpired }
+        // `notAnswering` is the store's word for "still true, just old".
+        if everBridged { throw UsageProviderError.notAnswering }
 
-        // Then Google directly, which answers for a licensed account.
-        if let windows = try await quota(token: credentials.accessToken), !windows.isEmpty {
-            return ProviderSnapshot(id: id, displayName: displayName, glyph: glyph,
-                                    fidelity: .official, status: .ok, windows: windows)
-        }
+        // Nothing has ever run here. Signed out and never installed look the
+        // same from outside, and both are answered by the same sentence, so
+        // there is nothing to be gained by telling them apart.
+        guard FileManager.default.fileExists(atPath: AntigravityActivity.transcriptRoot.path)
+        else { throw UsageProviderError.needsAuth }
 
-        // Not licensed, so Google will not say how much of what. Our own count
-        // is the only number left — reported as a *count*, with no
-        // `usedFraction`, which is a case the model already knows: the cell
-        // prints the number and the ring draws its track with no arc, because
-        // there is no limit to be a fraction of.
-        //
-        // Better than the dash it showed before, which read as broken rather
-        // than as "Google will not answer for this account".
+        // Installed and used, but not running — so no percentage is available.
+        // Our own count is the only number left, reported as a *count* with no
+        // `usedFraction`: the cell prints the number and the ring draws its
+        // track with no arc, because there is no limit to be a fraction of.
         let activity = AntigravityActivity.read()
         return ProviderSnapshot(
             id: id,
@@ -167,90 +135,5 @@ actor AntigravityProvider: UsageProvider {
         }
         bridge = fresh
         return try? await AntigravityBridge.quota(from: fresh, session: localSession)
-    }
-
-    /// Ask for the account's quota, returning nil when it is not allowed to.
-    ///
-    /// A free or personal account answers 403 #3501, "You do not have a valid
-    /// license of this product" — the endpoint exists and the request is well
-    /// formed, the entitlement is what is missing. That is not an error worth
-    /// alarming anyone about, so it returns nil and the caller falls back.
-    private func quota(token: String) async throws -> [LimitWindow]? {
-        var request = URLRequest(url: quotaEndpoint)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        // Empty on purpose. The request message carries no fields — sending
-        // `metadata` or `quotaId` is rejected outright with "Unknown name".
-        request.httpBody = Data("{}".utf8)
-        request.timeoutInterval = 15
-
-        let (data, response) = try await session.data(for: request)
-        guard (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
-        return Self.windows(in: data)
-    }
-
-    /// Turns a quota summary into limit windows.
-    ///
-    /// Written from the message names in Antigravity's own binary
-    /// (`QuotaSummaryGroup`, `QuotaSummaryBucket`, `QuotaLimit`) because no
-    /// licensed account was available to answer with a real body. So it is
-    /// deliberately suspicious of itself: anything without a positive limit, or
-    /// claiming more used than the limit allows, is dropped rather than shown.
-    /// An empty result sends the caller to the honest fallback, which is the
-    /// right outcome for a shape that turns out to differ.
-    static func windows(in data: Data) -> [LimitWindow] {
-        struct Response: Decodable {
-            struct Bucket: Decodable {
-                let name: String?
-                let displayName: String?
-                let used: Double?
-                let limit: Double?
-                let resetTime: String?
-            }
-            struct Group: Decodable {
-                let displayName: String?
-                let buckets: [Bucket]?
-            }
-            let quotaGroups: [Group]?
-            let buckets: [Bucket]?
-        }
-
-        guard let decoded = try? JSONDecoder().decode(Response.self, from: data) else { return [] }
-        let buckets = (decoded.quotaGroups?.flatMap { $0.buckets ?? [] } ?? []) + (decoded.buckets ?? [])
-
-        return buckets.compactMap { bucket in
-            guard let limit = bucket.limit, limit > 0,
-                  let used = bucket.used, used >= 0, used <= limit * 1.5
-            else { return nil }
-            let label = bucket.displayName ?? bucket.name ?? "Usage"
-            return LimitWindow(id: bucket.name ?? label,
-                               label: label,
-                               usedFraction: used / limit,
-                               resetsAt: bucket.resetTime.flatMap(AntigravityCredentials.parse))
-        }
-    }
-
-    /// The plan's display name, for the message the cell shows.
-    static func tier(in data: Data) -> String {
-        struct Response: Decodable {
-            struct Tier: Decodable {
-                let id: String?
-                let name: String?
-                let isDefault: Bool?
-            }
-            let allowedTiers: [Tier]?
-            let currentTier: Tier?
-        }
-
-        guard let decoded = try? JSONDecoder().decode(Response.self, from: data) else {
-            return "Gemini"
-        }
-        // `currentTier` appears once a tier has been chosen; before that the
-        // default among the allowed ones is what you are on.
-        let tier = decoded.currentTier
-            ?? decoded.allowedTiers?.first(where: { $0.isDefault == true })
-            ?? decoded.allowedTiers?.first
-        return tier?.name ?? "Gemini"
     }
 }

@@ -10,12 +10,9 @@ make run                 # build and launch
 ```
 
 None of these need an Apple Developer account. `xcodebuild` ad-hoc signs a
-Debug build automatically, which is enough to run and debug locally. The one
-thing an unsigned build can't do is keep a keychain "Always Allow" grant across
-rebuilds — Claude Code's and Antigravity's credentials are guarded by an ACL
-keyed on the signing identity, and an ad-hoc identity changes every build. In
-practice this means the keychain prompt reappears each time you rebuild during
-development; that's expected and doesn't affect anything else.
+Debug build automatically, which is enough to run and debug locally — the app
+reads no keychain item, so there is no access grant for a changing signing
+identity to invalidate.
 
 `make release` is different: it archives, signs with a Developer ID
 certificate, notarizes with Apple, and regenerates the Sparkle auto-update
@@ -52,10 +49,16 @@ minimum:
   endpoint or local state, `.derived` if you computed it yourself (the
   tooltip prefixes a `~`), `.manual` if it's a placeholder.
 - Every failure path should map to a `ProviderStatus`, not throw something the
-  UI can't render — see how `ClaudeOAuthProvider` and `CodexLocalProvider`
+  UI can't render — see how `ClaudeCLIProvider` and `CodexLocalProvider`
   handle theirs.
-- If the credential lives in the keychain, hold it with `CredentialCache`
-  rather than reading on every poll — see its doc comment for why.
+- **Never read a credential.** Run the vendor's own tool instead and let it use
+  its own — `ClaudeCLI`, `CodexBridge` and `AntigravityBridge` all do this. The
+  app makes no keychain call at all, and a new provider must not be the one to
+  add one. Where the tool's output is prose rather than JSON, fail closed: a
+  line you cannot parse is not a reading of zero.
+- Say so when the tool isn't there. `UsageProviderError.unavailable` carries a
+  sentence the card shows verbatim, and it drops the remembered reading —
+  a number you can no longer re-read is one you should stop showing.
 
 ## Reporting a bug
 

@@ -101,32 +101,18 @@ extension UsageProvider {
     /// No modal of our own to show, by default — `UsageStore.signIn` falls back
     /// to the route.
     func presentSignIn() {}
-
-    /// Providers that hold nothing in memory have nothing to drop.
-    func forgetCachedCredential() {}
 }
 
 /// A provider as the settings sheet needs it.
+///
+/// There is deliberately no "can this be refused" flag here any more. Codenotch
+/// reads no keychain item for any provider — every number comes from running
+/// the owning tool or reading a file it wrote — so macOS has nothing to refuse
+/// and there is no refusal for the sheet to offer to repair.
 struct ProviderSummary: Identifiable, Equatable {
-    /// Whether this provider's credential lives in the keychain, and so can be
-    /// refused. Cursor and Codex read ordinary files and never prompt, so
-    /// offering them an "allow access" button would be offering a cure for an
-    /// illness they cannot catch.
-    var usesKeychain: Bool { ClaudeProfile.isClaude(providerID: id) || id == "gemini" }
-
     let id: String
     let name: String
     let glyph: ProviderGlyph
     let account: ProviderAccount?
     let signIn: SignInRoute
-    /// Whether macOS refused this credential on the last fetch — the one state
-    /// "Allow access…" can actually repair.
-    ///
-    /// Deliberately *not* read off the snapshot's status. A refusal leaves the
-    /// last reading standing and its status untouched, because the number is
-    /// still true; the refusal itself is remembered separately by the store.
-    /// Offering to re-ask macOS for a credential it is already handing over is a
-    /// cure for an illness the provider does not have, and a button that does
-    /// nothing is indistinguishable from a broken one.
-    var wasRefusedAccess: Bool = false
 }

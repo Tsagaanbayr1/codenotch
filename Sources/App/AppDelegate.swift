@@ -68,7 +68,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // switched-off ones once the binding below delivered.
             Log.usage.info("claude profiles: \(self.claudeProfiles.map(\.displayPath).joined(separator: ", "), privacy: .public)")
             let store = UsageStore(
-                providers: claudeProfiles.map { ClaudeOAuthProvider(profile: $0) }
+                providers: claudeProfiles.map { ClaudeCLIProvider(profile: $0) }
                     + [CursorLocalProvider(), CodexLocalProvider(), AntigravityProvider(),
                        GLMProvider()]
                     + webProviders,
@@ -96,8 +96,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 signIn: { [weak store] in store?.signIn(providerID: $0) ?? false },
                 switchAccount: { [weak store] in
                     store?.openAccountSource(providerID: $0) ?? false
-                },
-                retry: { [weak store] in store?.reauthorize(providerID: $0) }
+                }
             )
             controller.onOpenSettings = { [weak settings] in settings?.show() }
             self.settings = settings
@@ -163,6 +162,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             store.start()
             controller.onRefresh = { [weak store] in store?.refreshNow() }
             controller.onRefreshProvider = { [weak store] id in store?.refresh(providerID: id) }
+            controller.onOpen = { [weak store] in store?.refreshOnOpen() }
             store.$refreshing
                 .receive(on: RunLoop.main)
                 .sink { [weak controller] ids in controller?.model.refreshing = ids }

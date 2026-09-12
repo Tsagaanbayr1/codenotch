@@ -471,7 +471,8 @@ final class StaleAfterMarginTests: XCTestCase {
     func testOneFailedIdleAttemptDoesNotDimTheRing() async throws {
         let store = UsageStore(
             providers: [FailingProvider()],
-            refreshInterval: 0.05, idleRefreshInterval: 0.15, staleAfter: 0.45,
+            refreshInterval: 0.05, busyRefreshInterval: 0.15, idleRefreshInterval: 0.15,
+            staleAfter: 0.45,
             archive: UsageArchive(defaults: defaults())
         )
         await store.refresh()
@@ -491,7 +492,8 @@ final class StaleAfterMarginTests: XCTestCase {
     func testItStillDimsOnceGenuinelyStale() async throws {
         let store = UsageStore(
             providers: [FailingProvider()],
-            refreshInterval: 0.05, idleRefreshInterval: 0.05, staleAfter: 0.2,
+            refreshInterval: 0.05, busyRefreshInterval: 0.05, idleRefreshInterval: 0.05,
+            staleAfter: 0.2,
             archive: UsageArchive(defaults: defaults())
         )
         await store.refresh()
