@@ -51,11 +51,14 @@ minimum:
 - Every failure path should map to a `ProviderStatus`, not throw something the
   UI can't render — see how `ClaudeCLIProvider` and `CodexLocalProvider`
   handle theirs.
-- **Never read a credential.** Run the vendor's own tool instead and let it use
-  its own — `ClaudeCLI`, `CodexBridge` and `AntigravityBridge` all do this. The
-  app makes no keychain call at all, and a new provider must not be the one to
-  add one. Where the tool's output is prose rather than JSON, fail closed: a
-  line you cannot parse is not a reading of zero.
+- **Never add keychain access.** The app makes no keychain call at all today,
+  and a new provider must not be the one to reintroduce one. Prefer running the
+  vendor's own tool and letting it use its own credential — `ClaudeCLI`,
+  `CodexBridge` and `AntigravityBridge` all do this. Cursor and GLM are the
+  documented exceptions: they read a key their own tool wrote to a file,
+  because neither vendor publishes a command that answers without one. Where a
+  tool's output is prose rather than JSON, fail closed: a line you cannot parse
+  is not a reading of zero.
 - Say so when the tool isn't there. `UsageProviderError.unavailable` carries a
   sentence the card shows verbatim, and it drops the remembered reading —
   a number you can no longer re-read is one you should stop showing.

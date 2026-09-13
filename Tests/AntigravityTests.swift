@@ -356,6 +356,62 @@ final class FirstRunCopyTests: XCTestCase {
 }
 
 /// Antigravity's port changes on every launch, so the bridge failing is a
+
+/// The bridged flag has to outlive a quit.
+///
+/// `AppDelegate` builds a new provider on every launch. With the flag starting
+/// at false, quitting with Antigravity closed meant the next launch took the
+/// fallback branch and *succeeded* with a request count — which the store then
+/// files as the last good reading, overwriting the archived percentage rather
+/// than dimming it. The guard is only worth anything if it survives the quit.
+final class BridgedStateTests: XCTestCase {
+    private func archive(fidelity: Fidelity?) -> UsageArchive {
+        let name = "BridgedStateTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defaults.removePersistentDomain(forName: name)
+        let archive = UsageArchive(defaults: defaults)
+        guard let fidelity else { return archive }
+        archive.save([
+            AntigravityProvider.providerID: (
+                ProviderSnapshot(id: AntigravityProvider.providerID,
+                                 displayName: "Antigravity", glyph: .antigravity,
+                                 fidelity: fidelity, status: .ok,
+                                 windows: [LimitWindow(id: "gemini-weekly",
+                                                       label: "Weekly",
+                                                       usedFraction: 0.31)]),
+                Date()
+            )
+        ])
+        return archive
+    }
+
+    /// A remembered percentage can only have come from the language server.
+    func testAnOfficialReadingSaysItHasBridged() {
+        XCTAssertTrue(AntigravityProvider.hasBridgedBefore(archive: archive(fidelity: .official)))
+    }
+
+    /// A remembered *count* does not: that is the fallback, and it says nothing
+    /// about whether the server has ever answered.
+    func testADerivedReadingDoesNot() {
+        XCTAssertFalse(AntigravityProvider.hasBridgedBefore(archive: archive(fidelity: .derived)))
+    }
+
+    func testAnEmptyArchiveDoesNot() {
+        XCTAssertFalse(AntigravityProvider.hasBridgedBefore(archive: archive(fidelity: nil)))
+    }
+
+    /// And the provider actually picks it up, rather than merely being able to.
+    func testTheProviderStartsBridgedAfterARelaunch() async {
+        let restarted = AntigravityProvider(archive: archive(fidelity: .official))
+        let bridged = await restarted.everBridgedForTesting
+        XCTAssertTrue(bridged, "a relaunch forgot that the server had answered")
+
+        let fresh = AntigravityProvider(archive: archive(fidelity: nil))
+        let neverBridged = await fresh.everBridgedForTesting
+        XCTAssertFalse(neverBridged)
+    }
+}
+
 /// routine event — the app was restarted, not the account lost.
 @MainActor
 final class AntigravityFallbackTests: XCTestCase {

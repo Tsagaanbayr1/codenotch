@@ -148,7 +148,13 @@ enum ClaudeUsageText {
         var calendar = calendar
         // The vendor names the zone it formatted in, and it is not always the
         // one this Mac is set to — someone on a work profile abroad gets both.
-        if let zone = capture(7, in: match, of: phrase).flatMap(TimeZone.init(identifier:)) {
+        //
+        // A name we cannot resolve gives up rather than falling back to this
+        // Mac's zone. Silently keeping the local zone does not fail, it
+        // *shifts* — the reading comes back confident and hours wrong, which is
+        // the one outcome this parser is built to avoid.
+        if let named = capture(7, in: match, of: phrase) {
+            guard let zone = TimeZone(identifier: named) else { return nil }
             calendar.timeZone = zone
         }
 
@@ -192,7 +198,10 @@ enum ClaudeUsageText {
     }
 
     private static let resetPhrase = try! NSRegularExpression(
-        pattern: #"^(?:(today|tomorrow)|([A-Za-z]{3,})\s+(\d{1,2}))\s+at\s+(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m\.?(?:\s*\(([^)]+)\))?"#,
+        // Anchored at both ends. Without the trailing `$` the pattern matches a
+        // *prefix*, so anything appended to the phrase later — a second clause,
+        // a footnote marker — would be silently ignored rather than noticed.
+        pattern: #"^(?:(today|tomorrow)|([A-Za-z]{3,})\s+(\d{1,2}))\s+at\s+(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m\.?(?:\s*\(([^)]+)\))?$"#,
         options: [.caseInsensitive]
     )
 

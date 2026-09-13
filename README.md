@@ -138,8 +138,7 @@ notch or clicking a ring refreshes immediately, which is when it matters.
 is giving no guidance, and obeying it is what keeps you limited — so the wait
 is 60s, doubling per consecutive 429, capped at 15 minutes, and the deadline is
 persisted, so relaunching during a penalty waits instead of spending an
-attempt on it. Polling drops to every 5 minutes when nothing is running, and
-right-clicking the notch offers **Refresh now**.
+attempt on it. Right-clicking the notch offers **Refresh now**.
 
 **Logs:** the app has no window, so anything worth diagnosing goes to the
 unified log.

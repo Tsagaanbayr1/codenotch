@@ -22,9 +22,10 @@ import os
 /// publishes no limit to divide by, and a confident 0% is worse than an
 /// admitted blank in something people pay for.
 actor AntigravityProvider: UsageProvider {
-    nonisolated let id = "gemini"
     // The id stays `gemini`: it keys the archive and the user's connection
     // choice, and changing it would silently discard both.
+    nonisolated static let providerID = "gemini"
+    nonisolated let id = AntigravityProvider.providerID
     nonisolated let displayName = "Antigravity"
     nonisolated let glyph = ProviderGlyph.antigravity
 
@@ -41,13 +42,36 @@ actor AntigravityProvider: UsageProvider {
     /// back to the request count then *replaces* a percentage with a plain
     /// number, and a ring that reads 8% one minute and 31 the next looks broken
     /// rather than degraded.
-    private var everBridged = false
+    private var everBridged: Bool
 
-    init() {
+    init(archive: UsageArchive = UsageArchive()) {
         self.localSession = URLSession(configuration: .ephemeral,
                                        delegate: LocalhostTrust(),
                                        delegateQueue: nil)
+        // Picked back up from the archive, not started at false.
+        //
+        // The app builds a new provider on every launch, so a flag that begins
+        // false forgets — every time — that the language server has ever
+        // answered. Quit with Antigravity closed and the next launch takes the
+        // fallback branch, *succeeds* with a request count, and the store files
+        // that as the last good reading: the archived percentage is not dimmed,
+        // it is overwritten. The guard below only works if it outlives a quit,
+        // and the remembered reading's own fidelity is the record of it.
+        self.everBridged = Self.hasBridgedBefore(archive: archive)
     }
+
+    /// Whether a remembered reading came from the language server.
+    ///
+    /// `.official` is only ever written by the bridge branch — every other path
+    /// through `fetchSnapshot` is `.derived` — so the archived fidelity is a
+    /// faithful record of whether it has answered on this machine.
+    static func hasBridgedBefore(archive: UsageArchive) -> Bool {
+        archive.load()[providerID]?.snapshot.fidelity == .official
+    }
+
+    /// Exposed so a test can prove the flag survives a relaunch rather than
+    /// having to simulate one.
+    var everBridgedForTesting: Bool { everBridged }
 
     nonisolated var signInRoute: SignInRoute {
         .openApp(bundleID: "com.google.antigravity", name: "Antigravity")
