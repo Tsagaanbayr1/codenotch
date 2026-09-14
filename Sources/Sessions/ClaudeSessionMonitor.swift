@@ -33,7 +33,7 @@ final class ClaudeSessionMonitor: ObservableObject, AgentActivityMonitor {
     ///
     /// The pid alone is enough: checked on this machine, the file the CLI
     /// writes carries the pid of the process Codenotch spawned, with no fork in
-    /// between. See `ClaudeTokenRefresher`.
+    /// between.
     var ignoredPIDs: () -> Set<Int32> = { [] }
 
     private var source: DispatchSourceFileSystemObject?

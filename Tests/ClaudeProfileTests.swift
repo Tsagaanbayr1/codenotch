@@ -49,46 +49,6 @@ final class ClaudeProfileTests: XCTestCase {
         XCTAssertEqual(profile.displayName, "Claude (work)")
         XCTAssertEqual(profile.sessionsDirectory.path, "/Users/vinz/.claude-work/sessions")
     }
-
-    /// Claude Code files a non-default profile's token under the service name
-    /// plus the first eight hex digits of the SHA-256 of the directory path.
-    /// Getting this wrong means "sign in" on a ring for an account that is
-    /// signed in.
-    func testTheKeychainServiceCarriesClaudeCodesHashOfThePath() {
-        let profile = ClaudeProfile(slug: "work",
-                                    configDirectory: URL(fileURLWithPath: "/Users/vinz/.claude-work"))
-        // `shasum -a 256` of the path, no trailing slash, no newline.
-        XCTAssertEqual(profile.keychainService, "Claude Code-credentials-19914660")
-    }
-
-    /// The path is hashed as Claude Code sees it, and Claude Code does not see
-    /// a trailing slash.
-    func testATrailingSlashDoesNotChangeTheHash() {
-        let slashed = ClaudeProfile(slug: "work",
-                                    configDirectory: URL(fileURLWithPath: "/Users/vinz/.claude-work/"))
-        XCTAssertEqual(slashed.keychainService, "Claude Code-credentials-19914660")
-    }
-
-    /// The default profile offers both service names — the suffix Claude Code
-    /// uses when `CLAUDE_CONFIG_DIR` is exported (even at the default path) and
-    /// the bare name older versions use — suffixed first so a current token
-    /// wins, bare kept so a legacy login still reads. Reading only the bare
-    /// name is what left the ring stuck on "Waiting for the first reading…".
-    func testTheDefaultProfileOffersBothTheSuffixedAndBareServices() {
-        let profile = ClaudeProfile.default(home: URL(fileURLWithPath: "/Users/vinz"))
-        // `shasum -a 256` of "/Users/vinz/.claude", first eight hex digits.
-        XCTAssertEqual(profile.keychainServices,
-                       ["Claude Code-credentials-337ba600", "Claude Code-credentials"])
-    }
-
-    /// A named profile is only ever written suffixed, so it offers exactly the
-    /// one service — no bare fallback that could shadow another account.
-    func testANamedProfileOffersOnlyItsSuffixedService() {
-        let profile = ClaudeProfile(slug: "work",
-                                    configDirectory: URL(fileURLWithPath: "/Users/vinz/.claude-work"))
-        XCTAssertEqual(profile.keychainServices, ["Claude Code-credentials-19914660"])
-    }
-
     func testProviderIDsAreRecognised() {
         XCTAssertTrue(ClaudeProfile.isClaude(providerID: "claude"))
         XCTAssertTrue(ClaudeProfile.isClaude(providerID: "claude-work"))
@@ -119,7 +79,7 @@ final class ClaudeProfileTests: XCTestCase {
             ".claude-work": ["settings.json"],
             ".claude-alpha": ["history.jsonl"]
         ])
-        let found = ClaudeProfile.discover(home: home, hasCredential: signedIn)
+        let found = ClaudeProfile.discover(home: home, hasAccount: signedIn)
         XCTAssertEqual(found.map(\.id), ["claude", "claude-alpha", "claude-work"])
         XCTAssertEqual(found[2].configDirectory.path, home.appendingPathComponent(".claude-work").path)
     }
@@ -132,7 +92,7 @@ final class ClaudeProfileTests: XCTestCase {
             ".claude-empty": [],
             ".claude-notes": ["README.md"]
         ])
-        XCTAssertEqual(ClaudeProfile.discover(home: home, hasCredential: signedIn).map(\.id), ["claude"])
+        XCTAssertEqual(ClaudeProfile.discover(home: home, hasAccount: signedIn).map(\.id), ["claude"])
     }
 
     /// Any one of the files Claude Code writes on first run is enough — they
@@ -143,7 +103,7 @@ final class ClaudeProfileTests: XCTestCase {
             ".claude-b": ["projects"],
             ".claude-c": [".claude.json"]
         ])
-        XCTAssertEqual(ClaudeProfile.discover(home: home, hasCredential: signedIn).map(\.id),
+        XCTAssertEqual(ClaudeProfile.discover(home: home, hasAccount: signedIn).map(\.id),
                        ["claude", "claude-a", "claude-b", "claude-c"])
     }
 
@@ -152,14 +112,14 @@ final class ClaudeProfileTests: XCTestCase {
         let home = try home([".claude": ["settings.json"]])
         FileManager.default.createFile(atPath: home.appendingPathComponent(".claude-work").path,
                                        contents: Data("not a directory".utf8))
-        XCTAssertEqual(ClaudeProfile.discover(home: home, hasCredential: signedIn).map(\.id), ["claude"])
+        XCTAssertEqual(ClaudeProfile.discover(home: home, hasAccount: signedIn).map(\.id), ["claude"])
     }
 
     /// `~/.claude` has always been read whether or not it exists yet, and a
     /// fresh Mac with no Claude Code still gets the ring that says so.
     func testTheDefaultIsAlwaysPresent() throws {
         let home = try home([:])
-        XCTAssertEqual(ClaudeProfile.discover(home: home, hasCredential: signedIn).map(\.id), ["claude"])
+        XCTAssertEqual(ClaudeProfile.discover(home: home, hasAccount: signedIn).map(\.id), ["claude"])
     }
 
     /// A plugin is not an account. `claude-mem` keeps its state in
@@ -172,9 +132,9 @@ final class ClaudeProfileTests: XCTestCase {
             ".claude": ["settings.json"],
             ".claude-mem": ["sessions", "settings.json"]
         ])
-        XCTAssertEqual(ClaudeProfile.discover(home: home, hasCredential: signedOut).map(\.id),
+        XCTAssertEqual(ClaudeProfile.discover(home: home, hasAccount: signedOut).map(\.id),
                        ["claude"])
-        XCTAssertEqual(ClaudeProfile.discover(home: home, hasCredential: signedIn).map(\.id),
+        XCTAssertEqual(ClaudeProfile.discover(home: home, hasAccount: signedIn).map(\.id),
                        ["claude", "claude-mem"],
                        "the filename rules are unchanged — only the credential decides")
     }
@@ -183,7 +143,7 @@ final class ClaudeProfileTests: XCTestCase {
     /// that has always been there to say "sign in".
     func testTheDefaultSurvivesHavingNoToken() throws {
         let home = try home([".claude": ["settings.json"]])
-        XCTAssertEqual(ClaudeProfile.discover(home: home, hasCredential: signedOut).map(\.id),
+        XCTAssertEqual(ClaudeProfile.discover(home: home, hasAccount: signedOut).map(\.id),
                        ["claude"])
     }
 
@@ -232,15 +192,6 @@ final class ClaudeProfileTests: XCTestCase {
 
     /// Stands in for the keychain so the test below cannot reach it.
     ///
-    /// Two profiles on a fictional `/Users/vinz` still resolve to the *real*
-    /// service name for the default one, so building them for real used to read
-    /// the login keychain — and on a test host rebuilt with a fresh ad-hoc
-    /// signature that means an authorization prompt, which hung the entire
-    /// suite on `providerSummaries`. What the test is about is naming and
-    /// ordering; the credential has nothing to do with it.
-    private static let noCredential: @Sendable () throws -> ClaudeCredentials = {
-        throw UsageProviderError.needsAuth
-    }
 
     /// Two providers, one id each, both drawn: the store has no idea they are
     /// the same tool and must not collapse them.
@@ -254,18 +205,15 @@ final class ClaudeProfileTests: XCTestCase {
             providers: [
                 // `cli: nil` throughout: this is about two profiles being two
                 // cells, and finding the machine's own Claude Code would make
-                // it about what the developer has installed. `noCredential`
-                // for the same reason on the other side — neither the CLI nor
-                // the keychain gets to decide what this test sees.
+                // it about what the developer has installed rather than about
+                // the code.
                 ClaudeOAuthProvider(profile: .default(home: home),
                                     archive: UsageArchive(defaults: defaults),
-                                    loadCredentials: Self.noCredential,
-                                    cli: nil),
+                                    cli: nil, desktopCache: nil),
                 ClaudeOAuthProvider(profile: ClaudeProfile(slug: "work",
                                                            configDirectory: home.appendingPathComponent(".claude-work")),
                                     archive: UsageArchive(defaults: defaults),
-                                    loadCredentials: Self.noCredential,
-                                    cli: nil)
+                                    cli: nil, desktopCache: nil)
             ],
             archive: UsageArchive(defaults: defaults)
         )

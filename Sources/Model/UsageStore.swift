@@ -24,7 +24,6 @@ final class UsageStore: ObservableObject {
     /// any snapshot says anything is wrong — which is exactly how a frozen
     /// reading went unnoticed for twelve hours. Reading it off the snapshot
     /// would reproduce the bug.
-    @Published private(set) var needsRenewal: Set<String> = []
 
     private let providers: [UsageProvider]
     /// Provider IDs block fetching before credential access. Model IDs only hide
@@ -221,7 +220,7 @@ final class UsageStore: ObservableObject {
                             account: disconnected.contains(provider.id) ? nil : provider.account(),
                             signIn: provider.signInRoute,
                             wasRefusedAccess: refusedAccess.contains(provider.id),
-                            needsSignInRenewal: needsRenewal.contains(provider.id))
+                            needsSignInRenewal: false)
             return [summary] + models.filter { $0.sourceProviderID == provider.id }
         }
         return ProviderOrder.arrange(summaries, by: order, id: \.id)
@@ -508,17 +507,6 @@ final class UsageStore: ObservableObject {
         return openAccountSource(providerID: providerID)
     }
 
-    /// Say that a provider's saved login needs renewing by hand.
-    ///
-    /// Called by `ClaudeTokenRefresher` when it tried and the expiry did not
-    /// move. The store only carries the fact so Settings can show it; it starts
-    /// nothing and retries nothing.
-    func reportRenewalFailed(providerID: String) {
-        guard !needsRenewal.contains(providerID) else { return }
-        needsRenewal.insert(providerID)
-        Log.usage.notice("\(providerID, privacy: .public): saved login needs renewing by hand")
-    }
-
     /// Ask macOS for this provider's credential again.
     ///
     /// The remedy for a declined keychain prompt. Dropping the in-memory copy
@@ -593,7 +581,6 @@ final class UsageStore: ObservableObject {
             // A reading that actually came back is proof the credential works,
             // whatever was thought a moment ago. The only way this clears —
             // there is no timer and nothing retries.
-            needsRenewal.remove(provider.id)
             Log.usage.debug("\(provider.id, privacy: .public): \(fresh.windows.count) window(s)")
             return fresh
         } catch {
@@ -715,7 +702,8 @@ final class UsageStore: ObservableObject {
             // and simply ages. `degraded` handles that; this is only what a
             // provider with nothing to show says.
             return .error("no response")
-        case UsageProviderError.nothingMetered(let why):
+        case UsageProviderError.nothingMetered(let why),
+             UsageProviderError.unavailable(let why):
             return .unsupported(why)
         case UsageProviderError.badResponse(let code):
             return .error("HTTP \(code)")

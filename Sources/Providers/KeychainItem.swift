@@ -87,7 +87,7 @@ enum KeychainItem {
 
     /// The newest item across several services — the same "newest wins" choice
     /// as `newest(service:)`, widened to a profile whose token may be filed
-    /// under more than one service name (see `ClaudeProfile.keychainServices`).
+    /// under more than one service name.
     /// Enumerating each service's attributes never raises a prompt, so trying
     /// two costs no extra dialogue over trying one.
     static func newest(services: [String], account: String? = nil) -> Match? {

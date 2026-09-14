@@ -103,7 +103,7 @@ enum AntigravityQuotaParser {
             guard bucket.disabled != true else { return nil }
             let groupName = group.displayName
             let rawID = self.id(for: bucket, group: groupName)
-            let reset = bucket.resetTime.flatMap(AntigravityCredentials.parse)
+            let reset = bucket.resetTime.flatMap(AntigravityResetTime.parse)
             if let remaining = bucket.fraction, (0...1).contains(remaining) {
                 return LimitWindow(
                     id: rawID,
@@ -136,7 +136,7 @@ enum AntigravityQuotaParser {
                 id: rawID,
                 label: self.label(for: bucket, fallback: rawID),
                 usedFraction: used / limit,
-                resetsAt: bucket.resetTime.flatMap(AntigravityCredentials.parse),
+                resetsAt: bucket.resetTime.flatMap(AntigravityResetTime.parse),
                 duration: self.duration(for: bucket))
         }
     }
@@ -151,7 +151,7 @@ enum AntigravityQuotaParser {
             guard let remaining = bucket.fraction, (0...1).contains(remaining) else { continue }
             let model = self.normalized(self.id(for: bucket, group: nil))
             guard !model.isEmpty, !model.starts(with: "chat_") else { continue }
-            let resetDate = bucket.resetTime.flatMap(AntigravityCredentials.parse)
+            let resetDate = bucket.resetTime.flatMap(AntigravityResetTime.parse)
             let resetIsWeekly: Bool
             if let resetDate {
                 resetIsWeekly = resetDate.timeIntervalSince(now) > 24 * 3600
@@ -274,5 +274,24 @@ enum AntigravityQuotaParser {
                 return trimmed.isEmpty ? nil : trimmed
             }
             .first ?? "quota"
+    }
+}
+
+/// `2026-08-31T21:53:49.575961+07:00` — RFC 3339 with an offset, not UTC.
+///
+/// Fractional seconds are not optional in this field, but a formatter that
+/// demands them fails on a whole-second timestamp, so both are tried. Lived on
+/// the Antigravity credential reader until that went away with the keychain;
+/// the timestamps
+/// it parses were always the language server's, never the token's.
+enum AntigravityResetTime {
+    static func parse(_ value: String) -> Date? {
+        let withFraction = ISO8601DateFormatter()
+        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = withFraction.date(from: value) { return date }
+
+        let plain = ISO8601DateFormatter()
+        plain.formatOptions = [.withInternetDateTime]
+        return plain.date(from: value)
     }
 }

@@ -1,63 +1,33 @@
 import Foundation
 import os
 
-/// One Claude account's limits, read from whichever source can answer without
-/// interrupting anyone.
+/// One Claude account's limits, read without ever touching a credential.
 ///
-/// Three sources, in order. Claude Desktop's HTTP cache is read first, because
-/// it is the one that costs nothing and cannot be refused: no subprocess, no
-/// keychain, no network — see `ClaudeDesktopUsageCache`. It answers only while
-/// Desktop is running, and only for the account Desktop is signed into, so where
-/// it is silent `claude "/usage"` is asked next: it reports the same figures off
-/// a credential Claude Code already holds, and needs no keychain access from
-/// this app — which matters because Claude Code files a new keychain item on
-/// every token rotation, so a grant the user gives against the old item is good
-/// for about an hour. Where that fails or Claude Code is not installed, the
-/// usage endpoint is called directly with the OAuth token from the keychain,
-/// exactly as before.
+/// Two sources, in order. Claude Desktop's HTTP cache is read first, because it
+/// is the one that costs nothing: no subprocess, no network — see
+/// `ClaudeDesktopUsageCache`. It answers only while Desktop is running, and
+/// only for the account Desktop is signed into, so where it is silent
+/// `claude "/usage"` is asked next: it reports the same figures off a
+/// credential Claude Code already holds.
+///
+/// There is deliberately no third source. This used to fall back to calling the
+/// usage endpoint directly with the OAuth token from the login keychain, and
+/// that path is gone: Codenotch reads no credential of anyone else's, for any
+/// provider. The cost is stated plainly on the card — with Desktop closed and
+/// Claude Code not installed, there is no reading, and saying so is better than
+/// opening someone's keychain to avoid saying it.
 ///
 /// One instance per `ClaudeProfile`: a work login kept under `~/.claude-work`
-/// has its own token, its own limits and its own ring, and this reads exactly
-/// one of them.
+/// has its own limits and its own ring, and this reads exactly one of them.
 ///
 /// The numbers are Anthropic's, so this is `.official` — the tooltip shows them
-/// unqualified. The endpoint is not a published API, though, so every failure
-/// path degrades to a status the UI can render honestly rather than to a guess.
+/// unqualified.
 actor ClaudeOAuthProvider: UsageProvider {
     nonisolated let profile: ClaudeProfile
     nonisolated let id: String
     nonisolated let displayName: String
     nonisolated let glyph = ProviderGlyph.claude
-    /// This profile's token, behind its own cache — see `ClaudeKeychain`.
-    nonisolated private let keychain: ClaudeKeychain
-
-    private let endpoint = URL(string: "https://api.anthropic.com/api/oauth/usage")!
-    private let session: URLSession
-    /// Held between refreshes so the keychain is read once per token, not once
-    /// per minute — a keychain read can put a prompt in front of the user.
-    private var credentials: ClaudeCredentials?
-    /// When the token runs out, as of the last keychain read — expired or not.
-    ///
-    /// Read-only bookkeeping for `ClaudeTokenRefresher`, which has to know how
-    /// long is left *before* deciding to do anything. Kept here because this is
-    /// already the one place that reads the item, so exposing it costs no extra
-    /// keychain traffic and no extra prompt.
-    private(set) var tokenExpiry: Date?
-    /// Set when the endpoint returns 429. Until it passes, refreshes are
-    /// skipped without touching the network — a poll that keeps firing into a
-    /// rate limit is how you stay rate limited.
-    private var retryNoEarlierThan: Date?
-    /// How many 429s in a row. The endpoint answers `Retry-After: 0`, which is
-    /// no guidance at all, so the wait doubles each time instead.
-    private var consecutiveRateLimits = 0
-
     private let archive: UsageArchive
-    /// How this profile's token is obtained. Injected for the same reason
-    /// `session` is: the token path had no tests, which is how a back-off that
-    /// never expired shipped. Production reads through this profile's own
-    /// `ClaudeKeychain`; a test substitutes a fake credential source instead.
-    private let loadCredentials: @Sendable () throws -> ClaudeCredentials
-
     /// How the CLI is asked, or nil where Claude Code is not installed. Nil is
     /// resolved once at init rather than per refresh: the answer only changes
     /// when someone installs or removes Claude Code, and the app is relaunched
@@ -102,9 +72,7 @@ actor ClaudeOAuthProvider: UsageProvider {
     private var lastCLIAttempt: Date?
 
     init(profile: ClaudeProfile = .default(),
-         session: URLSession = .shared,
          archive: UsageArchive = UsageArchive(),
-         loadCredentials: (@Sendable () throws -> ClaudeCredentials)? = nil,
          cli: ClaudeUsageCLI? = ClaudeUsageCLI.locate(),
          cliRefreshInterval: TimeInterval = 5 * 60,
          desktopCache: ClaudeDesktopUsageCache? = ClaudeDesktopUsageCache(),
@@ -118,83 +86,34 @@ actor ClaudeOAuthProvider: UsageProvider {
         self.profile = profile
         self.id = profile.id
         self.displayName = profile.displayName
-        let keychain = ClaudeKeychain(profile: profile)
-        self.keychain = keychain
-        self.loadCredentials = loadCredentials ?? { try keychain.load() }
-        self.session = session
         self.archive = archive
-        // Pick the back-off back up where the last run left it, so relaunching
-        // during a penalty does not spend an attempt extending it.
-        self.retryNoEarlierThan = archive.loadBackoffUntil(providerID: profile.id)
-    }
-
-    /// How close to expiry a back-off counts as already expired.
-    ///
-    /// The server hands back a 60s hint and `UsageStore` also ticks every 60s,
-    /// so the two run at the same period and the tick lands a few milliseconds
-    /// *before* the window opens — `retryAfter: 0.015` in the log. Refusing
-    /// that costs far more than the 15ms it saves: the caller is a timer, not a
-    /// retry loop, so the next attempt is not a moment later but a whole
-    /// refresh interval later. A 60s penalty silently becomes 120s and every
-    /// other tick is spent on nothing.
-    private let backoffSlack: TimeInterval = 1
-
-    /// Pure, so the resonance this exists to break can be tested without a
-    /// timer and a live endpoint.
-    nonisolated static func shouldHoldOff(until: Date?, slack: TimeInterval,
-                                          now: Date = Date()) -> Bool {
-        guard let until else { return false }
-        return until.timeIntervalSince(now) > slack
     }
 
     func fetchSnapshot() async throws -> ProviderSnapshot {
-        // Ahead of both the CLI and the back-off check. This is the cheapest
-        // source and the only one that can never interrupt anyone: it reads a
-        // file Claude Desktop has already written.
+        // The cheapest source, and the only one that costs no process at all:
+        // a file Claude Desktop has already written.
         if let windows = await desktopWindows() {
             return snapshot(windows: windows)
         }
-        // Ahead of the back-off check on purpose. That deadline is the
-        // endpoint's, and the CLI does not share the endpoint's rate limit —
-        // there is no reason for a 429 on one to darken a ring the other can
-        // still fill.
         if let windows = await cliWindows() {
             return snapshot(windows: windows, plan: lastCLIPlan)
         }
-        if Self.shouldHoldOff(until: retryNoEarlierThan, slack: backoffSlack),
-           let retryNoEarlierThan {
-            let remaining = retryNoEarlierThan.timeIntervalSinceNow
-            Log.usage.debug("skipping fetch, backing off for \(remaining, format: .fixed(precision: 0))s")
-            throw UsageProviderError.rateLimited(retryAfter: remaining)
-        }
-        do {
-            let snapshot = try await fetch(retryingOnUnauthorized: true)
-            retryNoEarlierThan = nil
-            consecutiveRateLimits = 0
-            archive.saveBackoffUntil(nil, providerID: id)
-            return snapshot
-        } catch UsageProviderError.needsAuth {
-            // The held copy goes, so the next tick re-reads. Backing off is
-            // `CredentialCache`'s job and it already does it correctly: it
-            // waits on the item's modification date rather than on a clock, so
-            // a token Claude Code has just rotated is picked up at once. A
-            // second timer here could only ever be wrong — and was: it stamped
-            // itself on every failed tick, so its own window never expired and
-            // the keychain was never read again.
-            credentials = nil
-            throw UsageProviderError.needsAuth
-        } catch UsageProviderError.credentialExpired {
-            credentials = nil
-            throw UsageProviderError.credentialExpired
-        } catch let error as UsageProviderError {
-            if case .rateLimited(let retryAfter) = error {
-                consecutiveRateLimits += 1
-                retryNoEarlierThan = Date().addingTimeInterval(retryAfter)
-                archive.saveBackoffUntil(retryNoEarlierThan, providerID: id)
-                Log.usage.notice("rate limited (\(self.consecutiveRateLimits)x), next attempt in \(retryAfter, format: .fixed(precision: 0))s")
-            }
-            throw error
-        }
+        // Both silent. There is nothing else to ask — the token path is gone on
+        // purpose — so say which tool would answer rather than show a number
+        // that cannot be checked.
+        throw UsageProviderError.unavailable(Self.noSourceMessage(hasCLI: cli != nil))
+    }
+
+    /// What the card says when neither source can answer.
+    ///
+    /// Two different situations and two different remedies: Claude Code not
+    /// installed is fixed by installing it, where Claude Code installed but
+    /// unable to answer is usually a signed-out profile. Telling someone to
+    /// install what they already have is how a card stops being believed.
+    static func noSourceMessage(hasCLI: Bool) -> String {
+        hasCLI
+            ? L10n.t("Claude Code couldn't report usage. Run `claude` once to sign in — Codenotch reads its /usage, and never your saved login.")
+            : L10n.t("Claude Code's CLI wasn't found. Codenotch reads your limits by running it, so it needs the CLI on this Mac.")
     }
 
     /// The snapshot shape every source produces. One place, so a window order or
@@ -268,13 +187,13 @@ actor ClaudeOAuthProvider: UsageProvider {
         return reading.windows
     }
 
-    /// What `claude "/usage"` last said, or nil to mean "use the token path".
+    /// What `claude "/usage"` last said, or nil where it could not answer.
     ///
     /// Deliberately cannot throw. Every way the CLI can fail — not installed,
-    /// signed out, wording changed, wedged and killed — is a reason to ask the
-    /// endpoint instead, not a reason to fail the refresh. The endpoint's
-    /// errors are also the ones `UsageStore` knows how to word, and a status
-    /// invented here would be a second vocabulary saying the same things.
+    /// signed out, wording changed, wedged and killed — reads the same from
+    /// here, and `fetchSnapshot` turns that single nil into one sentence the
+    /// card can show. A status invented in here would be a second vocabulary
+    /// saying the same thing.
     private func cliWindows() async -> [LimitWindow]? {
         guard let cli else { return nil }
         let now = Date()
@@ -297,104 +216,9 @@ actor ClaudeOAuthProvider: UsageProvider {
             Log.usage.debug("\(self.id, privacy: .public): read \(reading.windows.count) windows from claude /usage")
             return reading.windows
         } catch {
-            Log.usage.debug("\(self.id, privacy: .public): claude /usage did not answer, falling back to the token")
+            Log.usage.debug("\(self.id, privacy: .public): claude /usage did not answer")
             return nil
         }
-    }
-
-    private func fetch(retryingOnUnauthorized: Bool) async throws -> ProviderSnapshot {
-        let token = try currentToken()
-
-        var request = URLRequest(url: endpoint)
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
-        request.timeoutInterval = 15
-
-        Log.usage.debug("GET /api/oauth/usage")
-        let (data, response) = try await session.data(for: request)
-        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        Log.usage.debug("usage endpoint answered \(status)")
-
-        if status == 401 || status == 403 {
-            // Rejected but unexpired: the held copy is wrong, which is what
-            // signing into a different account looks like from here.
-            keychain.forgetCached()
-            // The cached token went stale mid-flight; re-read once in case
-            // Claude Code has refreshed it since.
-            credentials = nil
-            if retryingOnUnauthorized {
-                return try await fetch(retryingOnUnauthorized: false)
-            }
-            throw UsageProviderError.needsAuth
-        }
-        if status == 429 {
-            throw UsageProviderError.rateLimited(
-                retryAfter: Self.backoff(
-                    forAttempt: consecutiveRateLimits,
-                    retryAfter: Self.retryAfter(from: response)
-                )
-            )
-        }
-        guard (200..<300).contains(status) else {
-            throw UsageProviderError.badResponse(status: status)
-        }
-
-        let payload = try UsageResponse.decoder.decode(UsageResponse.self, from: data)
-        return snapshot(windows: payload.limitWindows(), plan: credentials?.subscriptionType)
-    }
-
-    private func currentToken() throws -> String {
-        if let credentials, !credentials.isExpired {
-            return credentials.accessToken
-        }
-        // No local back-off lock here — `CredentialCache`, behind `keychain`,
-        // already does this correctly: it waits on the item's modification
-        // date rather than on a clock, so a token Claude Code has just
-        // rotated is picked up at once. A second timer here could only ever
-        // be wrong, and was — it stamped itself on every failed tick, so its
-        // own window never expired and the keychain was never read again.
-        let fresh = try loadCredentials()
-        Log.usage.debug("\(self.id, privacy: .public): read keychain token, expires \(fresh.expiresAt, privacy: .public)")
-        tokenExpiry = fresh.expiresAt
-        // Expired is not signed out. Claude Code rotates this token whenever it
-        // runs, and this app deliberately does not — minting one would mean
-        // writing a credential it does not own, and racing the owner for it. So
-        // after a machine restart the token is usually stale until Claude Code
-        // is next used, and the honest thing is to keep showing the last reading
-        // with its age rather than demand a sign-in that is not needed.
-        guard !fresh.isExpired else { throw UsageProviderError.credentialExpired }
-        credentials = fresh
-        return fresh.accessToken
-    }
-
-    /// How long to wait after a 429.
-    ///
-    /// The server's own hint is honoured only as a *floor-raiser*: it answers
-    /// `Retry-After: 0`, and obeying that literally means retrying immediately,
-    /// which is what keeps you rate limited. So the wait starts at a minute and
-    /// doubles for each 429 in a row, capped so it always recovers on its own.
-    static func backoff(forAttempt attempt: Int, retryAfter: TimeInterval?) -> TimeInterval {
-        let floor: TimeInterval = 60
-        let ceiling: TimeInterval = 15 * 60
-        let doubled = floor * pow(2, Double(min(attempt, 4)))
-        return min(ceiling, max(doubled, retryAfter ?? 0))
-    }
-
-    /// `Retry-After` is either a number of seconds or an HTTP date.
-    static func retryAfter(from response: URLResponse?) -> TimeInterval? {
-        guard let header = (response as? HTTPURLResponse)?
-            .value(forHTTPHeaderField: "Retry-After")?
-            .trimmingCharacters(in: .whitespaces)
-        else { return nil }
-
-        if let seconds = TimeInterval(header) { return max(0, seconds) }
-
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(identifier: "GMT")
-        formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
-        guard let date = formatter.date(from: header) else { return nil }
-        return max(0, date.timeIntervalSinceNow)
     }
 
     nonisolated var signInRoute: SignInRoute {
@@ -403,55 +227,20 @@ actor ClaudeOAuthProvider: UsageProvider {
         .guidance(L10n.t("Run `\(profile.signInCommand)` once — it signs in and is what these readings come from. Use /login there to change account."))
     }
 
-    /// Reached only from "Allow access…", so this is the one path allowed to
-    /// raise the keychain dialogue — see `ClaudeKeychain.askAgain`.
-    nonisolated func forgetCachedCredential() { keychain.askAgain() }
-
-    /// Read the keychain again, ignoring anything held, and report the expiry.
-    ///
-    /// The after-check for `ClaudeTokenRefresher`, and the only caller that
-    /// should want it: everything else is served from the cache precisely so
-    /// that the keychain — and its prompt — is touched as rarely as possible.
-    func reloadTokenExpiry() -> Date? {
-        keychain.forgetCached()
-        credentials = nil
-        guard let fresh = try? loadCredentials() else { return nil }
-        tokenExpiry = fresh.expiresAt
-        return fresh.expiresAt
-    }
-
     nonisolated func account() -> ProviderAccount? {
         let manageURL = URL(string: "https://claude.ai/settings/usage")
 
-        // Settings must not be the thing that raises a keychain prompt. Where
-        // the CLI can answer, the readings never touch the token, and opening
-        // Settings to see whose account a ring is for would have been the one
-        // thing that did — the exact interruption this provider now avoids.
+        // Read from Claude Code's own config, which names the signed-in
+        // address and holds no secret. Nothing here can raise a keychain
+        // prompt, because nothing here opens a keychain item.
         //
         // The trade is the plan name for the address, and the address is the
         // more useful half: it says *which* account, which is the only question
         // two Claude rings ever raise, and the token could never answer it.
-        if cli != nil {
-            guard let address = profile.signedInAddress() else { return nil }
-            return ProviderAccount(
-                label: address,
-                plan: nil,   // Claude Code's own config does not name the plan
-                source: profile.sourceName,
-                manageURL: manageURL
-            )
-        }
-
-        // Through the injected source, not `keychain` directly. In production
-        // the source *is* `keychain.load()` — the default set in `init` — so
-        // nothing about how this reads, caches or prompts changes. What it buys
-        // is that a test can build a real provider without the call reaching
-        // the login keychain: it used to, and a test host rebuilt with a fresh
-        // ad-hoc signature would sit behind an authorization prompt nobody was
-        // there to answer, hanging the whole suite on `providerSummaries`.
-        guard let credentials = try? loadCredentials() else { return nil }
+        guard let address = profile.signedInAddress() else { return nil }
         return ProviderAccount(
-            label: profile.signedInAddress(),
-            plan: credentials.subscriptionType,
+            label: address,
+            plan: nil,   // Claude Code's own config does not name the plan
             source: profile.sourceName,
             manageURL: manageURL
         )

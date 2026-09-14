@@ -103,4 +103,12 @@ enum UsageProviderError: Error {
     /// Cursor's free plan reports an included limit of zero. Not an error, and
     /// it must not be shown as one.
     case nothingMetered(String)
+    /// The tool this provider reads through is not installed, or is not running,
+    /// or no longer answers in a shape we understand.
+    ///
+    /// Distinct from `needsAuth`, which means the tool is there and signed out:
+    /// telling someone to sign in when the CLI is simply missing sends them to
+    /// fix the wrong thing. Like `nothingMetered` it supersedes a remembered
+    /// reading — a number that can no longer be re-read is one to stop showing.
+    case unavailable(String)
 }
