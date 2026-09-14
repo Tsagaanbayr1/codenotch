@@ -1,8 +1,14 @@
 import Foundation
 
+enum ProviderKind: Equatable {
+    case usage
+    case localRuntime
+}
+
 /// One source of usage numbers. Each adapter declares how trustworthy it is,
 /// and the UI never dresses a derived number up as an official one.
 protocol UsageProvider {
+    var kind: ProviderKind { get }
     var id: String { get }
     /// Enough to draw the cell even when a fetch has never succeeded.
     var displayName: String { get }
@@ -33,23 +39,62 @@ protocol UsageProvider {
     /// route matters as much as this call. A requirement, not an extension
     /// member, for the reason spelled out above `account()`.
     func presentSignIn()
+    /// Open the provider's account-switch flow. Providers that do not own a
+    /// session have no special switching UI, so their normal sign-in action is
+    /// the honest fallback.
+    func presentAccountSwitch()
+    /// Drop any credential held in memory, so the next read goes to the
+    /// keychain for real.
+    ///
+    /// Without this, "ask me again" does nothing whenever a valid token is
+    /// still cached: the read is served from memory, macOS is never consulted,
+    /// and no prompt appears. A requirement, not an extension member, for the
+    /// reason spelled out above `account()`.
+    func forgetCachedCredential()
+    /// Whether this provider should keep a cell or placeholder in the notch when
+    /// its account or daemon is unavailable. Most providers default to `true`
+    /// so users see sign-in guidance; local daemon providers return `false`
+    /// so an inactive service does not take up a ring in the notch.
+    var isVisibleWhenAbsent: Bool { get }
+}
+
+extension UsageProvider {
+    func presentAccountSwitch() { presentSignIn() }
+
+    var isVisibleWhenAbsent: Bool { true }
+}
+
+extension UsageProvider {
+    var kind: ProviderKind { .usage }
 }
 
 enum UsageProviderError: Error {
     /// No usable credential — the user has to sign in again.
-    ///
-    /// Always the owning tool's credential, never one of ours: Codenotch reads
-    /// none. This is what "that tool is not signed in" looks like from here.
     case needsAuth
-    /// The tool answered before and is not answering now — it was quit, or
-    /// restarted onto a different port. Not the same as being signed out, and
-    /// not the same as being gone: the last reading is still true, just old, so
-    /// the store ages it rather than discarding it.
+    /// The credential is there, and macOS refused to hand it over — the
+    /// keychain prompt was declined. Not the same as being signed out: telling
+    /// someone to sign in, when they are signed in and merely pressed Deny,
+    /// sends them to fix something that is not broken.
+    case accessDenied
+    /// The credential is there but has expired, and the app that owns it will
+    /// refresh it the next time it runs. Not the same as being signed out: the
+    /// last reading is still true, just old.
+    case credentialExpired
+    /// The owning app emptied its own stored credential — the keychain item is
+    /// still there, with an empty token in it.
     ///
-    /// Named for the condition, not for a credential. It was `credentialExpired`
-    /// while the app still read tokens; it never reads one now, so a name about
-    /// expiry would describe something that cannot happen.
-    case notAnswering
+    /// Not the same as `needsAuth`, and the difference decides whether the last
+    /// reading survives. `needsAuth` means nobody ever signed in here, so there
+    /// is nothing to show. This means somebody *was* signed in, worked, and had
+    /// the credential taken out from under them. Claude Code does exactly that
+    /// to every profile at once after it auto-updates and then wakes from sleep
+    /// (anthropics/claude-code#19456, closed as not planned). The numbers taken
+    /// before that happened are still the truth about the account.
+    case signedOutByOwner
+    /// The fetch never came back inside the store's deadline. Says nothing
+    /// about the account — the usual cause is a keychain read sitting behind an
+    /// authorization prompt nobody has answered yet.
+    case timedOut
     /// The endpoint answered, but not with anything we understand.
     case badResponse(status: Int)
     /// Asked to slow down. Carries the server's own retry hint when it gave one.
@@ -58,11 +103,12 @@ enum UsageProviderError: Error {
     /// Cursor's free plan reports an included limit of zero. Not an error, and
     /// it must not be shown as one.
     case nothingMetered(String)
-    /// The tool this provider borrows its numbers from is not installed, or no
-    /// longer answers in a shape we understand. Distinct from `needsAuth`,
-    /// which means the tool is there and signed out: telling someone to sign in
-    /// when the CLI is simply missing sends them to fix the wrong thing. Like
-    /// `nothingMetered`, it supersedes any remembered reading — a number we can
-    /// no longer re-read is a number we should stop showing.
+    /// The tool this provider reads through is not installed, or is not running,
+    /// or no longer answers in a shape we understand.
+    ///
+    /// Distinct from `needsAuth`, which means the tool is there and signed out:
+    /// telling someone to sign in when the CLI is simply missing sends them to
+    /// fix the wrong thing. Like `nothingMetered` it supersedes a remembered
+    /// reading — a number that can no longer be re-read is one to stop showing.
     case unavailable(String)
 }

@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// One Claude Code configuration directory, and so one account.
@@ -10,13 +11,9 @@ import Foundation
 /// one of those accounts and was blind to the others: a work session never
 /// spun the ring, and the work limit was never drawn at all.
 ///
-/// A profile is *discovered* by the convention `~/.claude-<slug>`, never by the
-/// environment variable: the app is launched from Finder, so the alias's
-/// variable never reaches it, and the directories are the only trace the
-/// profiles leave. Once found, the directory is handed back to Claude Code as
-/// `CLAUDE_CONFIG_DIR` whenever `ClaudeCLI` asks it for a reading — the same
-/// mechanism the alias uses, which is what makes the two agree on whose limits
-/// are being shown.
+/// A profile is the *convention* `~/.claude-<slug>`, not the environment
+/// variable: the app is launched from Finder, so the alias's variable never
+/// reaches it, and the directories are the only trace the profiles leave.
 struct ClaudeProfile: Equatable, Hashable {
     /// The provider id the default profile has always had. Kept so archived
     /// readings, connection choices and the hover-band keys survive the change.
@@ -40,23 +37,46 @@ struct ClaudeProfile: Equatable, Hashable {
     /// Code has actually used, slugs in alphabetical order so the rings never
     /// swap places between launches.
     ///
-    /// "Actually used" is judged by the files Claude Code writes on its first
-    /// run — an empty directory, or a stray one someone made by hand, would
-    /// otherwise put a permanent "sign in" ring in the notch for an account
-    /// that does not exist.
+    /// "Actually used" is judged twice over. The files Claude Code writes on
+    /// its first run rule out an empty directory or a stray one someone made
+    /// by hand; a token filed under the directory's own service name rules out
+    /// everything else that has learned to live at `~/.claude-<slug>`.
+    ///
+    /// The second test is what keeps plugins out. `claude-mem` keeps its state
+    /// in `~/.claude-mem` and writes every one of the first-run names above, so
+    /// the filename rules pass it and it is not an account: Claude Code has
+    /// never signed in there and never will, so the ring could only ever read
+    /// "Sign in to Claude Code in ~/.claude-mem to read your usage" — advice
+    /// that cannot be followed, for a limit that does not exist. Filenames
+    /// alone cannot tell the two apart, and a denylist of plugin names would
+    /// only postpone the next one. The signed-in account can: no account, no
+    /// ring.
+    ///
+    /// `hasAccount` is injected so discovery stays testable, and the real one
+    /// reads Claude Code's own config rather than the login keychain. The
+    /// keychain answered this question first, and answered it well — but the
+    /// app opens no keychain item for anything now, and the config file settles
+    /// it just as firmly: a directory Claude Code has actually signed in to has
+    /// an address recorded in it, and a plugin's data directory does not.
     static func discover(home: URL = homeDirectory,
-                         fileManager: FileManager = .default) -> [ClaudeProfile] {
+                         fileManager: FileManager = .default,
+                         hasAccount: (ClaudeProfile) -> Bool = { $0.signedInAddress() != nil })
+    -> [ClaudeProfile] {
         let names = (try? fileManager.contentsOfDirectory(atPath: home.path)) ?? []
         let extras = names.compactMap { name -> ClaudeProfile? in
             guard let slug = slug(fromDirectoryName: name) else { return nil }
             let directory = home.appendingPathComponent(name)
             guard isProfileDirectory(directory, fileManager: fileManager) else { return nil }
-            return ClaudeProfile(slug: slug, configDirectory: directory)
+            let candidate = ClaudeProfile(slug: slug, configDirectory: directory)
+            guard hasAccount(candidate) else {
+                Log.usage.debug("ignoring \(candidate.displayPath, privacy: .public): looks like a profile but has no account signed in")
+                return nil
+            }
+            return candidate
         }
         return [ClaudeProfile.default(home: home)]
             + extras.sorted { $0.slug! < $1.slug! }
     }
-
     /// `.claude-work` → `work`; anything else → nil. The bare `.claude` is the
     /// default and is handled separately; `.claude.json` is a file that lives
     /// beside it and is not a profile at all.
@@ -120,6 +140,73 @@ struct ClaudeProfile: Equatable, Hashable {
     /// Where Claude Code writes one file per running process.
     var sessionsDirectory: URL { configDirectory.appendingPathComponent("sessions") }
 
+    /// Where it writes each session's transcript, one directory per working
+    /// directory. The registry says which sessions exist; this says what they
+    /// are doing — see `ClaudeTranscript`.
+    var projectsDirectory: URL { configDirectory.appendingPathComponent("projects") }
+
+    /// Claude Code's own settings file, which carries the signed-in address.
+    ///
+    /// The default profile keeps it *beside* the directory, at `~/.claude.json`;
+    /// a profile reached through `CLAUDE_CONFIG_DIR` keeps it *inside* its own
+    /// directory. Reading the wrong one shows the personal account against the
+    /// work ring, so the distinction matters more than it looks.
+    var accountFileURL: URL {
+        slug == nil
+            ? configDirectory.deletingLastPathComponent().appendingPathComponent(".claude.json")
+            : configDirectory.appendingPathComponent(".claude.json")
+    }
+
+    /// As much of Claude Code's own record of the account as is read here.
+    private struct AccountFile: Decodable {
+        struct Account: Decodable {
+            let emailAddress: String?
+            let organizationUuid: String?
+        }
+        let oauthAccount: Account?
+    }
+
+    /// Claude Code's record of who is signed in for this profile, or nil.
+    ///
+    /// Readable without a keychain prompt, which is the whole point of asking
+    /// here rather than of the token.
+    private func account() -> AccountFile.Account? {
+        guard let data = try? Data(contentsOf: accountFileURL),
+              let config = try? JSONDecoder().decode(AccountFile.self, from: data)
+        else { return nil }
+        return config.oauthAccount
+    }
+
+    /// Who is signed in, read from that file.
+    ///
+    /// Worth having because the keychain token does not carry an address, so
+    /// until now the settings row could not say *which* account a ring was for
+    /// — the one question two Claude rings actually raise. It is also readable
+    /// without a keychain prompt, which is the whole point of asking here.
+    func signedInAddress() -> String? {
+        guard let address = account()?.emailAddress, !address.isEmpty else { return nil }
+        return address
+    }
+
+    /// Which Anthropic organization this profile's account belongs to.
+    ///
+    /// The one thing that can tie a Claude *Desktop* cache entry to a Claude
+    /// *Code* profile: the cached usage URL is `/api/organizations/<uuid>/usage`,
+    /// and this is the same uuid. Without it, Desktop's numbers would be handed
+    /// to whichever ring asked first — the personal account's session percentage
+    /// drawn on the work ring. See `ClaudeDesktopUsageCache`.
+    func organizationID() -> String? {
+        guard let uuid = account()?.organizationUuid, !uuid.isEmpty else { return nil }
+        return uuid
+    }
+
+    static let defaultKeychainService = "Claude Code-credentials"
+
+    static func keychainSuffix(forPath path: String) -> String {
+        let digest = SHA256.hash(data: Data(path.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined().prefix(8).description
+    }
+
     // MARK: - Copy
 
     /// Which tool the credential is borrowed from, said so that two Claude rows
@@ -131,20 +218,5 @@ struct ClaudeProfile: Equatable, Hashable {
     /// The command that signs this profile in, for the row that has no button.
     var signInCommand: String {
         slug == nil ? "claude" : "CLAUDE_CONFIG_DIR=\(displayPath) claude"
-    }
-
-    /// What `CLAUDE_CONFIG_DIR` must be for a child `claude` to read *this*
-    /// profile — and nil for the default, which needs it **unset**.
-    ///
-    /// Setting it to `~/.claude` is not the no-op it looks like. Claude Code
-    /// keeps the default profile's account details in `~/.claude.json`, beside
-    /// the directory; naming the directory explicitly moves that lookup inside
-    /// it, to a `~/.claude/.claude.json` that holds machine settings and no
-    /// account at all. Claude Code then cannot see the subscription, and
-    /// `/usage` answers with a cost summary — an entirely believable printout
-    /// that says nothing about limits. The reading was lost for the default
-    /// profile, which is nearly everyone, and lost *quietly*.
-    var configDirectoryOverride: String? {
-        slug == nil ? nil : configDirectory.path
     }
 }

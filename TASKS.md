@@ -65,6 +65,9 @@ Design spec in [`docs/specs/2026-08-28-usage-notch-design.md`](docs/specs/2026-0
       reports neither
 - [x] **`WebSessionProvider`** — the browser plumbing written once; `Sites`
       carries the per-site origin, script and parser
+- [x] **DeepSeek Platform** — explicit WebView login, account funded/spent
+      summary, aggregate tokens/cost/requests/API-key metrics, and 30-day
+      daily token/cost charts from the Platform usage endpoints
 - [x] **Cursor** via the same route, pinned by `CursorUsageTests`
 - [x] Cursor's glyph, flattened from its own SVG rather than traced from the
       design frame — exact at any size. See "Flattening an SVG" below
@@ -164,8 +167,9 @@ means work is happening. `CodexActivityMonitor` errs short: the ring stops eight
 seconds after the last write rather than claiming activity it cannot see. If
 Codex grows a real status field, that should replace this.
 
-Perplexity's adapter is kept but unregistered. `WebSessionProvider` is the
-working pattern for a site behind bot management, and re-registering is one line.
+Perplexity's adapter is kept but unregistered. DeepSeek is the first registered
+Platform-login site using `WebSessionProvider`; its login remains explicit and
+its account data stays in the provider's own WebView session.
 
 ### Cursor
 
@@ -330,6 +334,21 @@ is signed with a stable Developer ID identity (`project.yml`) — an unsigned or
 ad-hoc build gets a new identity every rebuild and the prompt would come back
 after every `make run`. Click **Always Allow** once and it sticks. A refusal
 backs the provider off for five minutes so a denied prompt cannot spam.
+
+### Own items prompt too after an ad-hoc rebuild
+
+Items this app stores itself (`lmstudio-api-token`, `ollama-api-key`) are
+ACL-bound to the signing identity just like a borrowed one — an ad-hoc Debug
+build is a new identity every time, so the app goes back to being a stranger
+to its own item. `LMStudioCredentials`/`OllamaCredentials` were reading it
+uncached from the 1 s local-runtime timer, the 2 s `LMStudioLink` reconnect
+loop, and twice per render of `LMStudioSettingsRow.isPresent` — one prompt
+turned into one every few seconds. Both now sit behind `CredentialCache` +
+`KeychainItem.modifiedAt`, `isPresent` is an attribute probe rather than a
+data read, and `store`/`delete`/`forgetCachedCredential()` call
+`forgetCached()`. A free `Apple Development` certificate makes the `Makefile`
+sign Debug builds with a stable identity, so "Always Allow" survives rebuilds
+the same way it does for Claude/Cursor/Antigravity.
 
 ## M4b — Is it working? (agent activity)
 
@@ -548,7 +567,11 @@ and the tooltip header is dated.
       rather than from our own store — the user can turn it off in System
       Settings, and a remembered `true` would then be a lie
 - [x] Right-click menu: Keep open, Refresh now, Sign in…, Quit
-- [ ] Drag-to-reorder providers
+- [x] Drag-to-reorder providers. Stored as the ids the user actually placed,
+      not as an index per provider: the set is not fixed — Claude Code
+      contributes one per `~/.claude-<slug>` — so anything the stored order has
+      never seen is appended rather than dropped, and an id whose directory is
+      gone keeps its place instead of being pruned
 - [ ] Plan ceilings, auto-hide
 
 ### Accounts in settings
@@ -786,7 +809,7 @@ hundredths of a point wide; that is a fact about arcs, not a bug.
 - [ ] Threshold notifications (80% / 100%), per-provider mute
 - [ ] Auto-hide: never / on fullscreen / on overlap
 - [ ] Multi-display follow + unplug handling
-- [ ] Reduced-motion / reduced-transparency
+- [ ] Reduced-motion / reduced-transparency — reduced transparency is now the system's on the glass surface; see "The glass surface"
 - [ ] App icon, final name, README screenshots
 
 ## Managing accounts from Settings
@@ -824,8 +847,7 @@ credential, which is the same control under an honest name.
 - [x] `WebSessionProvider.signOut()` clears its own cookies — the one true
       logout in the app, because that session is the only one Codenotch created.
       Scoped to the site's host: the data store is shared, so emptying it would
-      sign the user out of every other web provider too. Nothing ships on this
-      path today, but the button would silently lie without it.
+      sign the user out of every other web provider too.
 - [x] Each row shows the account it reads (address and plan), with **Open** going
       to that vendor's own usage page.
 - [x] Every row states what signing out does *not* reach
@@ -1054,6 +1076,118 @@ it and then notice when the answer changes.
 - [x] It is a **count, never a percentage**, and the ring stays empty. A
       fraction needs a limit, no limit is published, and a denominator we made
       up would put a confident ring on a guess.
+
+### Gemini API key, via the tools' own logs
+
+- [x] **There is no endpoint to ask.** A bare `GEMINI_API_KEY` is billed per
+      token and Google publishes no usage or quota resource for one — unlike
+      Claude, Cursor and Codex, which each answer with a figure. So this
+      provider does not call anything. It adds up what the tools that spent the
+      key already wrote down on this Mac.
+- [x] **The key itself is never read**, and nothing here goes looking for it:
+      not `~/.zshrc`, not an `.env`, not `opencode.json`, not `auth.json`, not
+      the keychain. Knowing the key would not produce a number anyway, so
+      reading it would be a prompt and a liability bought for nothing. The only
+      credential-shaped thing touched is `~/.gemini/settings.json`, and only for
+      `security.auth.selectedType`, which names *how* the calls were paid for.
+- [x] Three sources, each with a **single definition of "tokens"** chosen from
+      that tool's own source so nothing is counted twice:
+      * **Gemini CLI** — `tokens.total` in
+        `~/.gemini/tmp/<project>/chats/session-*.jsonl`. It is already
+        input + output + thoughts + tool, and `cached` is a *subset* of `input`,
+        so summing the parts would double-count the cache.
+      * **OpenCode** — `tokens.total` from `opencode.db` when present and above
+        zero, else `input + output + reasoning + cache.read + cache.write`.
+        OpenCode's `input` excludes the cached part, so the components add up:
+        a real row reads 96008 = 2834 + 51 + 17 + 93106 + 0.
+      * **Hermes** — `input + cache_read + cache_write + output` from
+        `session_model_usage`. Reasoning is **excluded here but not for
+        OpenCode**, and that asymmetry is deliberate: Hermes's own
+        `CanonicalUsage.total_tokens` counts reasoning inside `output_tokens`,
+        so adding `reasoning_tokens` would bill those tokens twice, whereas
+        OpenCode's `reasoning` is a separate quantity.
+- [x] **The CLI's JSONL appends the same call twice.** Verified against Gemini
+      CLI 0.58.0's bundled `ChatRecordingService`: a `gemini` record is written
+      as soon as the answer starts, and written *again* with the same `id` once
+      `usageMetadata` arrives. Read naively, 26 lines in a real session became
+      26 calls where there were 15. So records are deduped by `id` with the last
+      one winning, and everything else — the header line, `{"$set":...}` patches,
+      `user` records, garbage — falls through.
+- [x] **`{"$rewindTo":"<id>"}` is ignored on purpose.** Rewinding the
+      conversation does not refund the call: those tokens were generated and
+      billed. Honouring the rewind would make the notch quietly under-report
+      exactly when someone is iterating hardest.
+- [x] Buckets are **local month and local day**, not UTC. Every timestamp on
+      disk is UTC, but the bill and the user's "today" are local, and the three
+      rows in the tooltip have to agree on where the boundary is — so all three
+      readers feed one routine, `GeminiTokenUsage.bucket`. Reading a UTC
+      timestamp as local time here would repeat the bug `procStart` and
+      `AntigravityActivity` each hit once already — the same mistake a third
+      time.
+- [x] Each reader pre-filters before it parses, because these files only grow:
+      the CLI skips any session file whose modification date predates the start
+      of the month (a file cannot hold records newer than its own mtime), and
+      both databases push the same cut-off into SQL against the indexed time
+      column. `json_extract` does the OpenCode filtering inside the system
+      libsqlite3, so nothing extra is linked.
+- [x] **Hermes rows are bucketed by `last_seen`**, whole. Its table stores one
+      aggregate per session and model, not per call, so a session straddling
+      midnight or month end lands entirely in the bucket of its last call. That
+      is the same granularity Hermes's own `/usage` reports, and splitting it
+      would mean inventing a distribution.
+- [x] `.derived` with no budget, `.manual` once the user sets one. The ceiling
+      in Settings is in **tokens, not money**: an API key publishes no limit, and
+      prices change under an app that ships every few weeks, so a currency
+      figure would go stale silently. Either way the tooltip keeps its `~` — the
+      number is assembled here, not quoted from Google.
+- [x] Counts are compacted for the ring (`651k`, `1.1M`). A 44 pt ring cannot
+      hold seven digits, and below 10 000 the digits are printed verbatim so no
+      existing request or credit count changes.
+- [x] Busy detection watches **Gemini CLI**, by modification date: the session
+      file holds no pid, so `ProcessLiveness` has nothing to verify, but the CLI
+      patches `lastUpdated` on every message — the same mtime substitute
+      Antigravity and Cursor use. The ring now merges three readers under
+      `gemini-api`, in tooltip order (Gemini CLI, OpenCode, Hermes), because
+      OpenCode's and Hermes's databases do carry a per-call marker that is
+      unambiguously a Gemini call, even though their mtimes alone would report
+      work that is not this provider's. OpenCode's marker is the newest
+      assistant message in a recently updated session with `providerID =
+      google` and no `time.completed`; sub-agent sessions fold into their
+      parent via `parent_id`, and the query is restricted to
+      `session.time_updated` within 45 s because `message` has no time index.
+      Hermes's marker is an open (`ended_at IS NULL`) session with
+      `billing_provider = gemini` whose `last_activity_at` is within 45 s, or an
+      unexpired row in `session_turn_leases`. None of the three tools persists
+      a "waiting for the user" state on disk — OpenCode exposes one only on its
+      password-protected local server's SSE stream — so the provider reports
+      busy or nothing, like Cursor and Antigravity, not Claude's busy/waiting/
+      idle.
+- [x] **Two departures from the provider template**, both deliberate. The
+      protocol extension's default `signInRoute` offers to sign in, and here
+      there is nothing to sign into, so this provider overrides it with a
+      `.guidance` message saying so and saying the key is never read; the
+      default would have put a button in Settings that could only fail. And
+      `lastTools` is `nonisolated(unsafe)` behind a `nonisolated func
+      account()`, the bargain `GLMProvider.lastKnownPlan` already makes: the
+      settings row asks for the account off the actor, and the worst a race can
+      do is name yesterday's tools for one row-draw.
+- [x] **The ring first shipped with the wrong mark.** `.antigravity` draws
+      Antigravity's arch, not the Gemini sparkle — the arch is the editor's own
+      logo, and the row next to it already wears it. The sparkle was sitting in
+      `GlyphOutline.gemini`, generated and referenced by nothing since the
+      Antigravity provider took the name. It could not simply reclaim the raw
+      value `gemini`: that string is an archive key, so a new case
+      `geminiSpark = "gemini-spark"` was added instead. A `gemini-api` snapshot
+      archived before this change still decodes as the arch and draws it until
+      the next poll overwrites it; one stale ring for one refresh is not worth a
+      migration.
+- [x] **Cloud Monitoring was considered and set aside.** It really does publish
+      official per-project counters, including
+      `generate_content_usage_output_token_count`, which would be a `.official`
+      reading. It needs gcloud application-default credentials and a token
+      refresh this app does not do, and the whole design here is to borrow a
+      credential another tool already holds rather than to acquire one. Worth
+      revisiting if the app ever grows a Google sign-in for another reason.
 
 ### Choosing how much the notch shows
 
@@ -1437,6 +1571,83 @@ Not an icon problem at all: the app had no Dock tile for an icon to sit on.
       window they had just opened.
 - [x] Clicking the Dock icon opens settings, via the `applicationShouldHandle
       Reopen` hook added for the Hide option. The notch stays where it is.
+
+## The glass surface
+
+### One glass, nothing underneath
+
+The expanded notch body, the tooltip and the settings orb are all painted, in
+the glass style, with `.glassEffect(.regular)` and nothing else — no tint, no
+colour underneath. That is deliberate: a wash of our own would sit under the
+glass and override the Clear/Tinted choice, light/dark mode and Reduce
+Transparency that the Mac's Appearance settings already control, so leaving
+the layer empty is what lets those settings reach the notch untouched. The
+tooltip is one shape, `TooltipSilhouette`, covering the card and the tail
+together rather than two separate glass shapes — two shapes each get their
+own rim highlight and show a seam where the tail meets the card.
+`testTheSilhouetteIsOneShapeCoveringCardAndTail`
+in `Tests/TooltipRenderTests.swift` pins it.
+
+### Solid stays the frame's
+
+`NotchSurfaceStyle.solid` — the non-default choice — forces `darkAqua` on the
+panel, so every hex the frame specifies still applies exactly as it did before
+glass existed. `Palette` gained light-appearance variants purely so the default
+glass style can follow the Mac into light mode: `textPrimary` `#000000`,
+`textSecondary` `#6B6B6B`, `ample` `#00A356` and `watch` `#B08800`, plus
+`ringTrack` at alpha 0.16 and `barTrack` at alpha 0.15 on black, all chosen for
+at least 3:1 contrast against white rather than sampled from anything.
+`PaletteAppearanceTests` (`Tests/UsageBandTests.swift`) pins both appearances,
+and `testTheSolidStyleForcesTheDarkAppearance` (`PanelSizingIntegrityTests`,
+`Tests/NotchRenderTests.swift`) pins the forced panel appearance.
+
+### What the tests can see
+
+`ImageRenderer` has no desktop behind it to refract, so almost every pixel test
+that renders the notch renders it in the solid style — glass with nothing
+behind it to sample is not what glass looks like on screen. The one glass
+exception is the hardware's band, below, which is painted the same opaque
+black regardless of style and so needs no desktop to read correctly. The other
+thing the glass style still has to prove headlessly is that the folded pill
+stays opaque black whatever the surface style is; `testTheFoldedPillIsOpaqueInTheGlassStyle`
+pins that rest state.
+
+### The hardware's band stays black
+
+A MacBook check showed the physical cutout, in the glass style, as a black
+rectangle set into a sheet of glass — the band at the hardware's height read
+as glass over nothing rather than as the hole in the screen it actually is.
+The fix keeps that band opaque black in both surface styles: it is a topmost
+layer in `NotchRootView.notch(_:)`, sized to `model.contentInset`, so the
+cutout and the drawn shape read as one wide notch again, and the glass begins
+only below it, where the readings begin. `testTheHardwaresBandStaysBlackInTheGlassStyle`
+pins it next to the solid-style band test.
+
+Upstream 1.7.0 draws the whole notch two points past the bezel
+(`NotchRootView.bezelBleed`, applied after `.scaleEffect`), so a band exactly
+`contentInset` deep ended two points short of the cutout's bottom and left a
+strip of glass inside the hole. The band is now `contentInset + bezelBleed /
+sizeScale` deep, which after scaling and the unscaled offset covers exactly
+`contentInset × sizeScale` on screen — the same region the readings are kept
+out of. It only showed in the full run: rendered alone, `ImageRenderer` draws
+glass transparent and the probe skips it; after earlier tests have exercised
+the effect it draws a light material, and
+`testTheHardwaresBandStaysBlackInTheGlassStyle` caught the strip.
+
+### Below macOS 26, and with Reduce transparency on
+
+Codenotch 1.7.0 targets macOS 15, where `glassEffect` does not exist yet. A
+material in the notch panel would have nothing behind it to blur, so below
+macOS 26 the glass style resolves to solid and the Surface setting is not
+offered at all — there is nothing to choose between. Reduce transparency
+resolves to solid too, following the same precedence the Settings window
+already uses for its own translucent chrome: Reduce transparency wins over
+glass. `testReduceTransparencyForcesTheDarkAppearance` and
+`testReduceTransparencyPaintsTheGlassStyleSolid` pin both cases. The window
+learns about a live accessibility change from
+`NSWorkspace.accessibilityDisplayOptionsDidChangeNotification` and re-applies
+the panel's appearance from that subscription, rather than only checking once
+at launch.
 
 ## Decisions needed
 - [ ] Final app name (`Codenotch` is a placeholder)

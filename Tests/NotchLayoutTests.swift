@@ -1,3 +1,4 @@
+import AppKit
 import XCTest
 @testable import Codenotch
 
@@ -43,6 +44,12 @@ final class NotchLayoutTests: XCTestCase {
 
     /// The session list is extra card, so the hover region has to grow with it
     /// or the pointer falls out of the bottom of a card it is still over.
+    func testCardGrowsWhenAPlanSitsUnderTheTitle() {
+        let bare = NotchLayout.cardHeight(windowCount: 2)
+        let named = NotchLayout.cardHeight(windowCount: 2, hasPlan: true)
+        XCTAssertEqual(named - bare, NotchLayout.cardBodyLineHeight, accuracy: 0.001)
+    }
+
     func testCardGrowsWithTheSessionList() {
         let bare = NotchLayout.cardHeight(windowCount: 2)
         let one = NotchLayout.cardHeight(windowCount: 2, sessionCount: 1)
@@ -63,6 +70,35 @@ final class NotchLayoutTests: XCTestCase {
         let trackInnerEdge = NotchLayout.ringDiameter / 2 - NotchLayout.trackStroke
         XCTAssertLessThan(outerEdge, trackInnerEdge)
         XCTAssertGreaterThan(innerEdge, NotchLayout.glyphSize / 2)
+    }
+
+    /// The weekly ring is placed against what is already inside the circle
+    /// rather than quoted from the design frame, which draws one ring — so the
+    /// clearances are what the test states, not the numbers.
+    func testTheInsideWeeklyRingClearsTheGlyphAndTheWorkingIndicator() {
+        let outer = NotchLayout.weeklyInsideRadius + NotchLayout.weeklyRingStroke / 2
+        let inner = NotchLayout.weeklyInsideRadius - NotchLayout.weeklyRingStroke / 2
+        XCTAssertGreaterThan(inner, NotchLayout.glyphSize / 2,
+                             "the weekly ring is drawn over the glyph")
+        XCTAssertLessThan(outer,
+                          NotchLayout.activityDiameter / 2 - NotchLayout.activityStroke / 2,
+                          "the weekly ring collides with the working indicator")
+    }
+
+    /// Outside, the two things it must not touch are the track it sits beyond
+    /// and the bezel the notch keeps clear of.
+    func testTheOutsideWeeklyRingClearsTheTrackAndTheBezel() {
+        let inner = NotchLayout.weeklyOutsideRadius - NotchLayout.weeklyRingStroke / 2
+        let outer = NotchLayout.weeklyOutsideRadius + NotchLayout.weeklyRingStroke / 2
+        XCTAssertGreaterThan(inner, NotchLayout.ringDiameter / 2,
+                             "the weekly ring overlaps the track it is meant to sit outside")
+        XCTAssertLessThan(outer, NotchLayout.ringDiameter / 2 + NotchLayout.ringMargin(for: .right),
+                          "the weekly ring reaches past the bezel")
+    }
+
+    /// Thinner than the headline arc: same kind of fact, lesser claim on the eye.
+    func testTheWeeklyRingIsThinnerThanTheHeadline() {
+        XCTAssertLessThan(NotchLayout.weeklyRingStroke, NotchLayout.progressStroke)
     }
 
     /// Every cell's tooltip has to fit inside the panel, or the card would be
@@ -346,6 +382,20 @@ final class PointerStateTests: XCTestCase {
 /// resting arc follows that curve rather than merely sitting near it.
 @MainActor
 final class SettingsOrbTests: XCTestCase {
+    func testCameraNotchHandlesMirrorEachOther() {
+        let model = NotchViewModel()
+        model.edge = .top
+        model.hardwareNotch = HardwareNotch(width: 220, height: 37)
+
+        XCTAssertEqual(model.moveAlong + model.orbAlong, model.shapeLength, accuracy: 0.001,
+                       "The buttons must sit equally far from the two ends")
+        let moveArc = model.moveAlong + model.moveArcOffset.width
+        let settingsArc = model.orbAlong + model.orbArcOffset.width
+        XCTAssertEqual(moveArc + settingsArc, model.shapeLength, accuracy: 0.001,
+                       "The resting arcs must mirror around the notch's centre")
+        XCTAssertEqual(model.moveArcOffset.height, model.orbArcOffset.height, accuracy: 0.001)
+    }
+
     private func centre(_ count: Int) -> CGFloat {
         NotchLayout.orbCenterAlong(cellCount: count)
     }
@@ -398,6 +448,16 @@ final class SettingsOrbTests: XCTestCase {
     func testTheHitRegionIsLargerThanTheOrb() {
         XCTAssertGreaterThan(NotchLayout.orbHotZone, NotchLayout.orbDiameter)
     }
+
+    /// The glass arc is masked by this path inside the view's bounds, so a band
+    /// running along the frame's edge would lose the outer half of its stroke.
+    func testTheArcBandStaysInsideItsFrame() {
+        let frame = CGRect(x: 0, y: 0, width: 100, height: 100)
+        let path = ArcBand(trim: 0...0.25, lineWidth: NotchLayout.orbStroke).path(in: frame)
+        XCTAssertFalse(path.isEmpty)
+        XCTAssertTrue(frame.insetBy(dx: -0.5, dy: -0.5).contains(path.boundingRect),
+                      "\(path.boundingRect) escapes the band's frame")
+    }
 }
 
 /// Hiding a provider is stored as the hidden set, so one added in a later
@@ -409,6 +469,16 @@ final class PreferencesTests: XCTestCase {
         let defaults = UserDefaults(suiteName: name)!
         defaults.removePersistentDomain(forName: name)
         return Preferences(defaults: defaults)
+    }
+
+    /// The defaults themselves, for the cases that need two `Preferences` over
+    /// the same store to stand in for a relaunch.
+    private func scratchDefaults() -> UserDefaults {
+        let name = "PreferencesTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defaults.removePersistentDomain(forName: name)
+        addTeardownBlock { defaults.removePersistentDomain(forName: name) }
+        return defaults
     }
 
     func testTheFirstLaunchIsAnnouncedExactlyOnce() {
@@ -445,6 +515,65 @@ final class PreferencesTests: XCTestCase {
         XCTAssertFalse(Preferences(defaults: defaults).isConnected("codex"))
     }
 
+    func testDisplayChoiceSurvivesARestart() {
+        let name = "PreferencesTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defaults.removePersistentDomain(forName: name)
+
+        Preferences(defaults: defaults).displayPreference = .display("monitor-uuid")
+
+        XCTAssertEqual(Preferences(defaults: defaults).displayPreference,
+                       .display("monitor-uuid"))
+    }
+
+    func testDisplayDefaultsToFollowingTheActiveWindow() {
+        XCTAssertEqual(preferences().displayPreference, .followActiveWindow)
+    }
+
+    func testAccentColorFollowsTheDeviceByDefault() {
+        XCTAssertEqual(preferences().accentColor, .system)
+    }
+
+    func testAccentColorChoiceSurvivesARestart() {
+        let name = "PreferencesAccentTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defaults.removePersistentDomain(forName: name)
+
+        Preferences(defaults: defaults).accentColor = .pink
+        XCTAssertEqual(Preferences(defaults: defaults).accentColor, .pink)
+    }
+
+    func testUnknownAccentColorFallsBackToTheDevice() {
+        let name = "PreferencesAccentFallbackTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defaults.removePersistentDomain(forName: name)
+        defaults.set("ultraviolet", forKey: "accentColor")
+
+        XCTAssertEqual(Preferences(defaults: defaults).accentColor, .system)
+    }
+
+    func testSurfaceStyleDefaultsToLiquidGlass() {
+        XCTAssertEqual(preferences().notchSurfaceStyle, .glass)
+    }
+
+    func testSurfaceStyleSurvivesARestart() {
+        let name = "PreferencesSurfaceStyleTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defaults.removePersistentDomain(forName: name)
+
+        Preferences(defaults: defaults).notchSurfaceStyle = .solid
+        XCTAssertEqual(Preferences(defaults: defaults).notchSurfaceStyle, .solid)
+    }
+
+    func testAnUnknownSurfaceStyleFallsBackToLiquidGlass() {
+        let name = "PreferencesSurfaceStyleFallbackTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defaults.removePersistentDomain(forName: name)
+        defaults.set("frosted", forKey: "notchSurfaceStyle")
+
+        XCTAssertEqual(Preferences(defaults: defaults).notchSurfaceStyle, .glass)
+    }
+
     /// The key is deliberately unchanged across the rename, so choices made
     /// before it survive.
     func testItReadsChoicesStoredUnderTheOldName() {
@@ -454,6 +583,80 @@ final class PreferencesTests: XCTestCase {
         defaults.set(["cursor"], forKey: "hiddenProviders")
 
         XCTAssertFalse(Preferences(defaults: defaults).isConnected("cursor"))
+    }
+
+    // MARK: - Order
+
+    func testNoStoredOrderMeansNeverChosen() {
+        XCTAssertTrue(Preferences(defaults: scratchDefaults()).providerOrder.isEmpty)
+    }
+
+    func testTheOrderSurvivesARelaunch() {
+        let defaults = scratchDefaults()
+
+        Preferences(defaults: defaults).setProviderOrder(["codex", "claude", "cursor"])
+
+        XCTAssertEqual(Preferences(defaults: defaults).providerOrder,
+                       ["codex", "claude", "cursor"])
+    }
+
+    func testAnAbsentProfileKeepsItsPlaceAcrossAMove() {
+        let preferences = Preferences(defaults: scratchDefaults())
+        preferences.setProviderOrder(["claude", "claude-work", "cursor"])
+
+        // Settings can only show what was discovered at launch, and
+        // `~/.claude-work` is not on this Mac today.
+        preferences.setProviderOrder(["cursor", "claude"])
+
+        XCTAssertEqual(preferences.providerOrder, ["cursor", "claude", "claude-work"])
+    }
+
+    /// No ceiling is the honest default: an API key is billed per token and
+    /// publishes no limit, so the ring stays unfilled until the user names one.
+    func testTheGeminiTokenBudgetStartsUnset() {
+        XCTAssertNil(preferences().geminiAPIMonthlyTokenBudget)
+    }
+
+    func testTheGeminiTokenBudgetSurvivesARestart() {
+        let name = "PreferencesTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defaults.removePersistentDomain(forName: name)
+
+        Preferences(defaults: defaults).geminiAPIMonthlyTokenBudget = 2_000_000
+
+        XCTAssertEqual(Preferences(defaults: defaults).geminiAPIMonthlyTokenBudget, 2_000_000)
+        // The provider is an actor and reads the store directly, off the main
+        // actor — so that path has to see the same value.
+        XCTAssertEqual(Preferences.storedGeminiAPIMonthlyTokenBudget(defaults: defaults),
+                       2_000_000)
+    }
+
+    /// Clearing the field has to remove the key, not leave the old ceiling
+    /// behind for the next launch to read back.
+    func testClearingTheGeminiTokenBudgetForgetsIt() {
+        let name = "PreferencesTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defaults.removePersistentDomain(forName: name)
+
+        let p = Preferences(defaults: defaults)
+        p.geminiAPIMonthlyTokenBudget = 2_000_000
+        p.geminiAPIMonthlyTokenBudget = nil
+
+        XCTAssertNil(defaults.object(forKey: "geminiAPIMonthlyTokenBudget"))
+        XCTAssertNil(Preferences(defaults: defaults).geminiAPIMonthlyTokenBudget)
+    }
+
+    /// A budget of zero would divide the ring by nothing, so it reads as no
+    /// budget at all rather than as a ceiling already blown.
+    func testAZeroGeminiTokenBudgetReadsAsNone() {
+        let name = "PreferencesTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defaults.removePersistentDomain(forName: name)
+
+        Preferences(defaults: defaults).geminiAPIMonthlyTokenBudget = 0
+
+        XCTAssertNil(Preferences(defaults: defaults).geminiAPIMonthlyTokenBudget)
+        XCTAssertNil(Preferences.storedGeminiAPIMonthlyTokenBudget(defaults: defaults))
     }
 }
 
@@ -581,6 +784,40 @@ final class ProviderGlyphTests: XCTestCase {
     func testTheRawValueSurvivesTheRename() {
         XCTAssertEqual(ProviderGlyph.antigravity.rawValue, "gemini")
     }
+
+    /// `gemini` was taken by the arch before the sparkle needed a name, and it
+    /// is an archive key, so the sparkle got a second one rather than the two
+    /// marks trading meanings under stored readings.
+    func testTheSparkHasItsOwnRawValue() {
+        XCTAssertEqual(ProviderGlyph.geminiSpark.rawValue, "gemini-spark")
+    }
+
+    /// The dispatch is one line and pointing it at the arch would be silent —
+    /// both marks fill the box and both are one closed loop. What separates
+    /// them is where the ink reaches the edge: the spark has a point at each of
+    /// the four edge midpoints, while the arch touches the top at its apex and
+    /// is open along the bottom.
+    func testTheSparkResolvesToTheSparkleAndNotTheArch() throws {
+        let spark = ProviderGlyph.geminiSpark.outline
+        XCTAssertEqual(spark.count, 1)
+        let points = try XCTUnwrap(spark.first)
+
+        let left = try XCTUnwrap(points.min { $0.x < $1.x })
+        XCTAssertEqual(left.x, 0, accuracy: 0.01)
+        XCTAssertEqual(left.y, 0.5, accuracy: 0.01)
+
+        let right = try XCTUnwrap(points.max { $0.x < $1.x })
+        XCTAssertEqual(right.x, 1, accuracy: 0.01)
+        XCTAssertEqual(right.y, 0.5, accuracy: 0.01)
+
+        let top = try XCTUnwrap(points.min { $0.y < $1.y })
+        XCTAssertEqual(top.y, 0, accuracy: 0.01)
+        XCTAssertEqual(top.x, 0.5, accuracy: 0.01)
+
+        let bottom = try XCTUnwrap(points.max { $0.y < $1.y })
+        XCTAssertEqual(bottom.y, 1, accuracy: 0.01)
+        XCTAssertEqual(bottom.x, 0.5, accuracy: 0.01)
+    }
 }
 
 
@@ -627,6 +864,125 @@ final class NotchVisibilityTests: XCTestCase {
         for mode in NotchVisibility.allCases {
             XCTAssertFalse(mode.title.isEmpty)
             XCTAssertFalse(mode.explanation.isEmpty)
+        }
+    }
+}
+
+/// Which displays get a notch. Its default matters: get it wrong and a fresh
+/// install with two displays either shows a notch where none was expected or
+/// hides the one that was always there.
+final class NotchScreenScopeTests: XCTestCase {
+    private func defaults() -> UserDefaults {
+        let name = "NotchScreenScopeTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defaults.removePersistentDomain(forName: name)
+        return defaults
+    }
+
+    @MainActor
+    func testItDefaultsToMainDisplayOnly() {
+        XCTAssertEqual(Preferences(defaults: defaults()).notchScope, .mainDisplay)
+    }
+
+    @MainActor
+    func testTheChoiceSurvivesARestart() {
+        let defaults = defaults()
+        Preferences(defaults: defaults).notchScope = .allDisplays
+        XCTAssertEqual(Preferences(defaults: defaults).notchScope, .allDisplays)
+    }
+
+    /// A value written by a future version must not leave every display bare —
+    /// it falls back to the main one.
+    @MainActor
+    func testAnUnknownStoredValueFallsBackToMainDisplay() {
+        let defaults = defaults()
+        defaults.set("projector", forKey: "notchScope")
+        XCTAssertEqual(Preferences(defaults: defaults).notchScope, .mainDisplay)
+    }
+
+    func testEveryScopeIsOfferedAndNamed() {
+        XCTAssertEqual(NotchScreenScope.allCases.count, 2)
+        for scope in NotchScreenScope.allCases {
+            XCTAssertFalse(scope.title.isEmpty)
+            XCTAssertFalse(scope.explanation.isEmpty)
+        }
+    }
+}
+
+/// The fleet's add/remove maths, without any displays: which controllers to
+/// retire and which to create when the screen list changes.
+final class NotchFleetReconcileTests: XCTestCase {
+    private func key(_ n: Int) -> NSNumber { NSNumber(value: n) }
+
+    func testAnEmptyFleetAddsEveryDesiredScreen() {
+        let plan = NotchFleet.planReconciliation(current: [], desired: [key(1), key(2)])
+        XCTAssertTrue(plan.remove.isEmpty)
+        XCTAssertEqual(plan.add, [key(1), key(2)])
+    }
+
+    func testAnUnchangedListPlansNothing() {
+        let plan = NotchFleet.planReconciliation(
+            current: [key(1), key(2)], desired: [key(2), key(1)])
+        XCTAssertTrue(plan.remove.isEmpty)
+        XCTAssertTrue(plan.add.isEmpty)
+    }
+
+    func testAGoneScreenIsRetiredAndANewOneAdded() {
+        let plan = NotchFleet.planReconciliation(
+            current: [key(1), key(2)], desired: [key(2), key(3)])
+        XCTAssertEqual(plan.remove, [key(1)])
+        XCTAssertEqual(plan.add, [key(3)])
+    }
+
+    func testDisconnectingEverythingRetiresEverything() {
+        let plan = NotchFleet.planReconciliation(current: [key(1)], desired: [])
+        XCTAssertEqual(plan.remove, [key(1)])
+        XCTAssertTrue(plan.add.isEmpty)
+    }
+
+    /// Screen keys identify notches one-to-one, so real displays must never
+    /// share one — otherwise two panels would be keyed as a single controller.
+    func testRealScreensHaveDistinctKeys() {
+        let screens = NSScreen.screens
+        guard !screens.isEmpty else { return }
+        let keys = screens.map(NotchFleet.key)
+        XCTAssertEqual(Set(keys).count, keys.count)
+    }
+}
+
+/// The fleet against the real screen list: main-only keeps a single notch,
+/// all-displays one per screen. On a one-display Mac both are one — the point
+/// is the count follows the scope, not a fixed number.
+@MainActor
+final class NotchFleetScopeTests: XCTestCase {
+    func testMainDisplayKeepsASingleNotch() {
+        let fleet = NotchFleet(scope: .mainDisplay, edge: .right)
+        fleet.show()
+        defer { fleet.stop() }
+        XCTAssertEqual(fleet.controllersForTesting.count, min(1, NSScreen.screens.count))
+    }
+
+    func testAllDisplaysKeepsOneNotchPerScreen() {
+        let fleet = NotchFleet(scope: .allDisplays, edge: .right)
+        fleet.show()
+        defer { fleet.stop() }
+        XCTAssertEqual(fleet.controllersForTesting.count, NSScreen.screens.count)
+    }
+
+    /// A controller created late — a display plugged in at noon — starts with
+    /// today's readings rather than empty rings.
+    func testLateControllersStartWithCurrentReadings() {
+        let fleet = NotchFleet(scope: .mainDisplay, edge: .right)
+        fleet.show()
+        defer { fleet.stop() }
+        let reading = ProviderSnapshot(
+            id: "codex", displayName: "Codex", glyph: .openai,
+            fidelity: .official, status: .ok,
+            windows: [LimitWindow(id: "primary", label: "5h limit", usedFraction: 0.27)],
+            headlineID: "primary")
+        fleet.setSnapshots([reading])
+        for controller in fleet.controllersForTesting {
+            XCTAssertEqual(controller.model.snapshots, [reading])
         }
     }
 }
@@ -784,14 +1140,11 @@ final class SessionCapTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(model.sessionCap(cellCount: 4), 6)
     }
 
-    /// Even the shortest display Macs ship with lists at least what the fixed
-    /// cap used to, so solving for the screen never costs anyone a row.
     @MainActor func testTheSmallestLaptopIsNoWorseOffThanTheFixedCap() {
         let model = NotchViewModel()
         model.edge = .right
         model.screenSize = CGSize(width: 1470, height: 956)   // 13-inch Air
-        XCTAssertGreaterThanOrEqual(model.sessionCap(cellCount: 4),
-                                    NotchLayout.defaultSessionCap)
+        XCTAssertGreaterThanOrEqual(model.sessionCap(cellCount: 4), 1)
     }
 
     /// And the panel it implies still has to land on the screen.
@@ -804,7 +1157,6 @@ final class SessionCapTests: XCTestCase {
             let model = NotchViewModel()
             model.edge = .right
             model.screenSize = CGSize(width: 1512, height: height)
-            model.screenUsableSize = CGSize(width: 1512, height: height - 37)
             XCTAssertLessThanOrEqual(
                 model.panelSize(cellCount: 4).height, height,
                 "the panel runs off a \(height)pt screen"
@@ -813,17 +1165,15 @@ final class SessionCapTests: XCTestCase {
     }
 
     /// A top or bottom notch spends the card's height reaching inward instead,
-    /// against the usable screen — it starts below the menu bar, so the menu
-    /// bar is room it never had.
-    @MainActor func testAHorizontalNotchStaysWithinTheUsableScreen() {
+    /// against the full screen, starting at the physical bezel.
+    @MainActor func testAHorizontalNotchStaysWithinThePhysicalScreen() {
         for height in stride(from: CGFloat(900), through: 2000, by: 23) {
             for edge in [NotchEdge.top, .bottom] {
                 let model = NotchViewModel()
                 model.edge = edge
                 model.screenSize = CGSize(width: 1512, height: height)
-                model.screenUsableSize = CGSize(width: 1512, height: height - 37)
                 XCTAssertLessThanOrEqual(
-                    model.panelSize(cellCount: 4).height, height - 37,
+                    model.panelSize(cellCount: 4).height, height,
                     "\(edge): the panel runs off a \(height)pt screen"
                 )
             }
@@ -877,8 +1227,8 @@ final class StatusMessageHeightTests: XCTestCase {
     private var everyStatusCard: [(name: String, snapshot: ProviderSnapshot)] {
         let states: [(String, ProviderStatus)] = [
             ("needsAuth", .needsAuth),
+            ("accessDenied", .accessDenied),
             ("unsupported", .unsupported("The free plan has nothing for Cursor to meter yet")),
-            ("missingCLI", .unsupported(ClaudeCLIProvider.missingCLIMessage)),
             ("error", .error("HTTP 500")),
             ("stale", .stale(since: .distantPast)),
             ("ok", .ok)
@@ -907,17 +1257,12 @@ final class StatusMessageHeightTests: XCTestCase {
         }
     }
 
-    /// The kind of message that found this: three lines where one was reserved.
-    ///
-    /// The original was the keychain refusal, which no longer exists — nothing
-    /// reads a credential any more. The longest message the app can still show
-    /// is the missing-CLI one, and it has exactly the same shape of problem.
-    func testALongMessageIsGivenItsRealHeight() {
-        let missing = ProviderSnapshot(id: "claude", displayName: "Claude",
-                                       glyph: .claude, fidelity: .official,
-                                       status: .unsupported(ClaudeCLIProvider.missingCLIMessage),
-                                       windows: [])
-        let message = try! XCTUnwrap(missing.statusMessage)
+    /// The message that found this: three lines where one was reserved.
+    func testARefusalMessageIsGivenItsRealHeight() {
+        let refused = ProviderSnapshot(id: "gemini", displayName: "Antigravity",
+                                       glyph: .antigravity, fidelity: .official,
+                                       status: .accessDenied, windows: [])
+        let message = try! XCTUnwrap(refused.statusMessage)
         XCTAssertGreaterThan(NotchLayout.bodyTextHeight(message),
                              2 * NotchLayout.cardBodyLineHeight,
                              "the message that motivated this now fits on one line")
@@ -952,5 +1297,93 @@ final class StatusMessageHeightTests: XCTestCase {
                 "\(name): a status card overflows the panel"
             )
         }
+    }
+}
+
+/// Choosing a size multiplies the whole surface. What matters is that it is a
+/// multiplication and nothing more: the design frame stays the thing every
+/// constant is quoted from, and `medium` stays that frame untouched.
+@MainActor
+final class NotchSizeTests: XCTestCase {
+    private struct Screen: ScreenDescribing {
+        var frameValue: CGRect
+        var visibleFrameValue: CGRect
+    }
+
+    private func model(scale: CGFloat, edge: NotchEdge = .right,
+                       height: CGFloat = 900) -> NotchViewModel {
+        let model = NotchViewModel()
+        model.edge = edge
+        model.sizeScale = scale
+        model.adopt(screen: Screen(frameValue: CGRect(x: 0, y: 0, width: 1440, height: height),
+                                   visibleFrameValue: CGRect(x: 0, y: 0, width: 1440, height: height)))
+        return model
+    }
+
+    /// The point of the setting, stated as the thing the eye actually judges:
+    /// the notch's own body, at the size it is drawn on screen.
+    ///
+    /// Not the panel — most of that is transparent padding reserved for the
+    /// tooltip, and it is budgeted against a screen that does not grow when the
+    /// notch does, so the panel is not monotonic in the size choice even though
+    /// the notch is.
+    func testTheDrawnNotchGrowsWithTheSizeChoice() {
+        func drawnDepth(_ size: NotchSize) -> CGFloat {
+            let model = model(scale: size.scale)
+            model.isExpanded = true
+            return model.notchDepth * size.scale
+        }
+
+        XCTAssertGreaterThan(drawnDepth(.large), drawnDepth(.medium))
+        XCTAssertGreaterThan(drawnDepth(.medium), drawnDepth(.small))
+    }
+
+    /// The other half of that coupling, pinned so it is a decision rather than
+    /// a surprise: a larger notch is given a *shorter* card, because the screen
+    /// it has to fit on stayed the same size.
+    func testALargerNotchIsGivenAShorterCard() {
+        XCTAssertLessThan(model(scale: 1.25).maxCardHeight(cellCount: 3),
+                          model(scale: 0.8).maxCardHeight(cellCount: 3))
+    }
+
+    /// The trap this feature sets for itself. The tooltip is budgeted against
+    /// the screen, and the screen does not grow when the notch does — so a card
+    /// sized against the raw height would be drawn a quarter taller than it was
+    /// budgeted for, and run off the bottom of a small display.
+    func testALargerNotchGetsASmallerTooltipBudget() {
+        let large = model(scale: 1.25).sessionCap(cellCount: 3)
+        let medium = model(scale: 1).sessionCap(cellCount: 3)
+        let small = model(scale: 0.8).sessionCap(cellCount: 3)
+
+        XCTAssertLessThanOrEqual(large, medium)
+        XCTAssertLessThanOrEqual(medium, small)
+    }
+
+    /// And the card that budget produces still fits the screen it was budgeted
+    /// against — which is the property the cap exists to hold.
+    func testTheCardStillFitsTheScreenAtEverySize() {
+        for size in NotchSize.allCases {
+            let height: CGFloat = 900
+            let card = model(scale: size.scale, height: height).maxCardHeight(cellCount: 3)
+            XCTAssertLessThanOrEqual(card, height,
+                                     "\(size.rawValue) gives a \(card)pt card on a \(height)pt screen")
+        }
+    }
+
+    /// The point of this whole split: the tooltip is drawn at one size whatever
+    /// the notch is set to. Its text has a legible size of its own, and
+    /// shrinking the reading you opened the notch to read is the opposite of
+    /// the point.
+    ///
+    /// Read off the panel, because that is where a scaled card would show: the
+    /// panel's depth is the drawn notch plus the card's own room, so the whole
+    /// difference between two sizes has to be the notch's share alone.
+    func testTheTooltipKeepsItsOwnSizeWhateverTheNotchIs() {
+        let large = model(scale: 1.25)
+        let medium = model(scale: 1)
+        let notchShare = medium.contentInset + NotchLayout.bodyDepth(for: .right)
+
+        XCTAssertEqual(large.panelSize(cellCount: 3).width - medium.panelSize(cellCount: 3).width,
+                       notchShare * 0.25, accuracy: 0.001)
     }
 }

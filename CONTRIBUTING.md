@@ -10,9 +10,23 @@ make run                 # build and launch
 ```
 
 None of these need an Apple Developer account. `xcodebuild` ad-hoc signs a
-Debug build automatically, which is enough to run and debug locally — the app
-reads no keychain item, so there is no access grant for a changing signing
-identity to invalidate.
+Debug build automatically, which is enough to run and debug locally.
+
+A note on the keychain, because it is not only a development annoyance. A
+keychain item has an access list, which is what "Always Allow" writes to, and a
+*partition list*, which nothing in the GUI ever writes to. An app outside the
+partition list is refused before the access list is consulted, so approving the
+dialogue is good for one read. Claude Code recreates its keychain items on every
+token rotation, and a new item's partition list admits only Apple's own tools —
+which refuses a properly signed release build as surely as an ad-hoc one.
+
+So `ClaudeCredentials.read` never shows the dialogue from a background refresh:
+interaction is switched off for the read, and a refusal is retried through
+`/usr/bin/security`, which is Apple-signed and on the item's access list. The
+one read that may prompt is the one somebody clicks **Allow access…** for in
+Settings. To stop the refusal happening at all, `Scripts/fix-keychain-partitions.sh`
+adds Codenotch's Team ID to those items' partition lists — once, with your login
+password.
 
 `make release` is different: it archives, signs with a Developer ID
 certificate, notarizes with Apple, and regenerates the Sparkle auto-update
@@ -40,6 +54,21 @@ credentials only the maintainer has. You won't need it to contribute.
   visible, honest status — `stale`, `needsAuth`, `accessDenied`, `error` — and
   never invent a number. See `UsageProviderError` and `ProviderStatus`.
 
+## Visible copy
+
+- User-visible strings (settings, menus, tooltips, notifications, What's New,
+  provider labels and status) go through `L10n.t("English source")`. The
+  English source **is** the key.
+- English is the source language. Put optional translations in
+  `Sources/Localizable.xcstrings`. A missing translation falls back to
+  English and must not fail tests — do not gate CI on any locale being
+  complete.
+- Don't freeze `L10n.t` in a `static let` — lookup has to see the current
+  language.
+- Follow System plus the in-app Language setting; don't set `AppleLanguages`.
+- Windows `windows/codenotch/src/i18n.rs` is a separate system — don't merge
+  the two.
+
 ## Adding a provider
 
 Implement `UsageProvider` (`Sources/Providers/UsageProvider.swift`). At
@@ -49,19 +78,10 @@ minimum:
   endpoint or local state, `.derived` if you computed it yourself (the
   tooltip prefixes a `~`), `.manual` if it's a placeholder.
 - Every failure path should map to a `ProviderStatus`, not throw something the
-  UI can't render — see how `ClaudeCLIProvider` and `CodexLocalProvider`
+  UI can't render — see how `ClaudeOAuthProvider` and `CodexLocalProvider`
   handle theirs.
-- **Never add keychain access.** The app makes no keychain call at all today,
-  and a new provider must not be the one to reintroduce one. Prefer running the
-  vendor's own tool and letting it use its own credential — `ClaudeCLI`,
-  `CodexBridge` and `AntigravityBridge` all do this. Cursor and GLM are the
-  documented exceptions: they read a key their own tool wrote to a file,
-  because neither vendor publishes a command that answers without one. Where a
-  tool's output is prose rather than JSON, fail closed: a line you cannot parse
-  is not a reading of zero.
-- Say so when the tool isn't there. `UsageProviderError.unavailable` carries a
-  sentence the card shows verbatim, and it drops the remembered reading —
-  a number you can no longer re-read is one you should stop showing.
+- If the credential lives in the keychain, hold it with `CredentialCache`
+  rather than reading on every poll — see its doc comment for why.
 
 ## Reporting a bug
 

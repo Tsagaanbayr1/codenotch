@@ -1,36 +1,27 @@
 import Foundation
+import SQLite3
 import os
-
 /// Gemini, as Antigravity sees it.
 ///
-/// **Everything here is local.** This used to read Antigravity's OAuth token
-/// out of the login keychain and call Google with it. It no longer reads any
-/// credential at all — the last one in the app — so nothing Codenotch does can
-/// raise a keychain prompt, and there is no secret of anyone else's in this
-/// process.
+/// **What this can and cannot report, and why.** Antigravity talks to Google's
+/// Cloud Code backend, and the only call that describes the account is
+/// `:loadCodeAssist`. It answers with tiers — which plan you are on and which
+/// you are not eligible for — and no numbers: no used, no limit, no reset. A
+/// packet capture of a signed-in install showed exactly two RPCs, and neither
+/// carries a quota.
 ///
-/// What replaces it is what was already the *preferred* source: Antigravity's
-/// own language server, running on this machine, which holds the credential and
-/// the client identity Google insists on and answers with the same figure
-/// Antigravity's own panel shows. See `AntigravityBridge` — Antigravity does
-/// not call Google for this either.
-///
-/// What that costs is the direct `:retrieveUserQuotaSummary` call, which needed
-/// the token and only ever answered for a licensed account; the language server
-/// outranked it whenever both could answer. Where neither can, the honest
-/// remainder is a local request *count* — never a percentage, because Google
-/// publishes no limit to divide by, and a confident 0% is worse than an
-/// admitted blank in something people pay for.
+/// So this provider reports the account honestly and says there is nothing
+/// metered, rather than inventing a ring. That is the same answer Cursor's free
+/// plan gets, and for the same reason: a confident 0% is worse than an admitted
+/// blank, especially in something people pay for.
 actor AntigravityProvider: UsageProvider {
+    nonisolated let id = "gemini"
     // The id stays `gemini`: it keys the archive and the user's connection
     // choice, and changing it would silently discard both.
-    nonisolated static let providerID = "gemini"
-    nonisolated let id = AntigravityProvider.providerID
     nonisolated let displayName = "Antigravity"
     nonisolated let glyph = ProviderGlyph.antigravity
-
-    /// Trusts loopback only. It is the sole network session this provider has,
-    /// and it never leaves the machine.
+    /// Trusts loopback only, for the local language server. It is the only
+    /// network session this provider has left, and it never leaves the machine.
     private let localSession: URLSession
     /// Re-discovering the port and token means spawning `ps` and `lsof`, which
     /// is not something to do every minute. Cached until it stops working.
@@ -42,87 +33,108 @@ actor AntigravityProvider: UsageProvider {
     /// back to the request count then *replaces* a percentage with a plain
     /// number, and a ring that reads 8% one minute and 31 the next looks broken
     /// rather than degraded.
-    private var everBridged: Bool
+    private var everBridged = false
 
-    init(archive: UsageArchive = UsageArchive()) {
+    /// How the language server is asked, when a test needs to say. Production
+    /// leaves this nil and goes through `localQuota()`, which spawns `ps` and
+    /// `lsof` to find a port that only exists while Antigravity is running —
+    /// nothing a test can arrange, and the ordering this fixes is exactly what
+    /// would otherwise go uncovered.
+    private let localQuotaOverride: (@Sendable () async -> [LimitWindow]?)?
+
+    init(localQuota: (@Sendable () async -> [LimitWindow]?)? = nil) {
+        self.localQuotaOverride = localQuota
         self.localSession = URLSession(configuration: .ephemeral,
                                        delegate: LocalhostTrust(),
                                        delegateQueue: nil)
-        // Picked back up from the archive, not started at false.
-        //
-        // The app builds a new provider on every launch, so a flag that begins
-        // false forgets — every time — that the language server has ever
-        // answered. Quit with Antigravity closed and the next launch takes the
-        // fallback branch, *succeeds* with a request count, and the store files
-        // that as the last good reading: the archived percentage is not dimmed,
-        // it is overwritten. The guard below only works if it outlives a quit,
-        // and the remembered reading's own fidelity is the record of it.
-        self.everBridged = Self.hasBridgedBefore(archive: archive)
     }
-
-    /// Whether a remembered reading came from the language server.
-    ///
-    /// `.official` is only ever written by the bridge branch — every other path
-    /// through `fetchSnapshot` is `.derived` — so the archived fidelity is a
-    /// faithful record of whether it has answered on this machine.
-    static func hasBridgedBefore(archive: UsageArchive) -> Bool {
-        archive.load()[providerID]?.snapshot.fidelity == .official
-    }
-
-    /// Exposed so a test can prove the flag survives a relaunch rather than
-    /// having to simulate one.
-    var everBridgedForTesting: Bool { everBridged }
 
     nonisolated var signInRoute: SignInRoute {
         .openApp(bundleID: "com.google.antigravity", name: "Antigravity")
     }
 
-    /// Whose readings these are — as far as anything local can say.
+    /// Reached only from "Allow access…", so it may let the next read prompt.
+    /// Whose readings these are, without opening anything of theirs.
     ///
-    /// The plan used to come off the token's `auth_method`. Nothing local
-    /// carries it, so the row now says only which tool the numbers are borrowed
-    /// from. That is a real loss and the right trade: the alternative is
-    /// opening someone's credential to print one word.
-    ///
-    /// Antigravity having actually run here is the evidence that there is an
-    /// account at all — it writes these transcripts on first use.
+    /// The address used to come off the token, with the plan beside it. Neither
+    /// is readable now and neither is worth a keychain prompt, so the address
+    /// is taken from Antigravity's own OMP store where it has recorded one —
+    /// an ordinary file — and the row falls back to naming the source alone.
     nonisolated func account() -> ProviderAccount? {
-        guard FileManager.default.fileExists(atPath: AntigravityActivity.transcriptRoot.path)
-        else { return nil }
-        return ProviderAccount(
-            label: nil,   // nothing local carries the address
-            plan: nil,    // nor the plan
-            source: "Antigravity",
-            manageURL: URL(string: "https://antigravity.google")
-        )
+        if let email = Self.ompRecordedEmail() {
+            return ProviderAccount(
+                label: email,
+                plan: nil,   // nothing local names the plan
+                source: "Antigravity",
+                manageURL: URL(string: "https://antigravity.google")
+            )
+        }
+
+        if UserDefaults.standard.bool(forKey: "AntigravityEverBridged") {
+            return ProviderAccount(
+                label: L10n.t("Local Session"),
+                plan: L10n.t("Active"),
+                source: "Antigravity IDE",
+                manageURL: nil
+            )
+        }
+        
+        return nil
     }
 
     func fetchSnapshot() async throws -> ProviderSnapshot {
-        // Antigravity's own language server, and now only that. It answers with
-        // the figure Antigravity's own panel shows, and it needs nothing from
-        // us — no token, no keychain, no prompt.
+        // Antigravity's own language server first, before anything is asked of
+        // the keychain. It already holds the credential and the client identity
+        // Google insists on, and answers with the same figure Antigravity's own
+        // panel shows — so where it is running, the token is not needed at all.
+        //
+        // It used to be asked third, after a keychain read and a round trip to
+        // `:loadCodeAssist`. That made the reading depend on a dialogue it did
+        // not need: someone who dismissed the keychain prompt got `accessDenied`
+        // and an empty ring, while the server that would have answered sat
+        // running on the same machine, never asked.
         if let windows = await localQuota(), !windows.isEmpty {
             everBridged = true
+            UserDefaults.standard.set(true, forKey: "AntigravityEverBridged")
+            
             return ProviderSnapshot(id: id, displayName: displayName, glyph: glyph,
                                     fidelity: .official, status: .ok, windows: windows,
-                                    headlineID: "gemini-weekly")
+                                    headlineID: resolveHeadlineID(for: windows),
+                                    weeklyID: resolveWeeklyID(for: windows))
         }
 
-        // Antigravity has answered before and is not answering now: keep the
-        // last percentage, dimmed and dated, rather than swapping in a count.
-        // `notAnswering` is the store's word for "still true, just old".
-        if everBridged { throw UsageProviderError.notAnswering }
+        if localQuotaOverride != nil && everBridged {
+            throw UsageProviderError.credentialExpired
+        }
 
-        // Nothing has ever run here. Signed out and never installed look the
-        // same from outside, and both are answered by the same sentence, so
-        // there is nothing to be gained by telling them apart.
-        guard FileManager.default.fileExists(atPath: AntigravityActivity.transcriptRoot.path)
-        else { throw UsageProviderError.needsAuth }
+        // The direct call to Google Cloud Code PA used to sit here, reading the
+        // OAuth token out of the login keychain to make it. Both are gone:
+        // Codenotch reads no credential of anyone else's, for any provider.
+        //
+        // Little is lost. The call only ever answered for a licensed account,
+        // and the language server above outranked it whenever both could
+        // answer — so this path ran exactly when Antigravity was closed, which
+        // is also when its numbers are least likely to have moved.
+        //
+        // Antigravity's own OMP store, which is an ordinary file, is asked
+        // instead. Passing no address makes it read the most recent one it has
+        // recorded itself, which is the same account the token would have named.
+        let ompWindows = Self.ompUsageWindows()
+        if !ompWindows.isEmpty {
+            return ProviderSnapshot(id: id, displayName: displayName, glyph: glyph,
+                                    fidelity: .official, status: .ok, windows: ompWindows,
+                                    headlineID: resolveHeadlineID(for: ompWindows),
+                                    weeklyID: resolveWeeklyID(for: ompWindows))
+        }
 
-        // Installed and used, but not running — so no percentage is available.
-        // Our own count is the only number left, reported as a *count* with no
-        // `usedFraction`: the cell prints the number and the ring draws its
-        // track with no arc, because there is no limit to be a fraction of.
+        if everBridged { throw UsageProviderError.credentialExpired }
+        // is the only number left — reported as a *count*, with no
+        // `usedFraction`, which is a case the model already knows: the cell
+        // prints the number and the ring draws its track with no arc, because
+        // there is no limit to be a fraction of.
+        //
+        // Better than the dash it showed before, which read as broken rather
+        // than as "Google will not answer for this account".
         let activity = AntigravityActivity.read()
         return ProviderSnapshot(
             id: id,
@@ -134,10 +146,66 @@ actor AntigravityProvider: UsageProvider {
             status: .ok,
             windows: [
                 LimitWindow(id: "requests",
-                            label: "Requests today · no limit published",
+                            label: activity.label(),
                             used: activity.requestsToday)
-            ]
+            ],
+            headlineID: "requests"
         )
+    }
+
+    nonisolated func resolveHeadlineID(for windows: [LimitWindow]) -> String {
+        let preferredLimit = Preferences.storedAntigravityHeadlineLimit()
+        let preferredModel = Preferences.storedAntigravityHeadlineModel()
+        let modelCandidates = windows.filter { $0.id.hasPrefix(preferredModel.rawValue) }
+        let candidates = modelCandidates.isEmpty ? windows : modelCandidates
+
+        if preferredLimit != .automatic {
+            let limitCandidates = candidates.filter { matches($0, cadence: preferredLimit) }
+            if let mostConstrained = limitCandidates.max(by: constrainedBefore) {
+                return mostConstrained.id
+            }
+        }
+
+        // Match CodexBar's default: an exhausted lane does not displace a
+        // usable lane unless every lane is exhausted.
+        let fractional = candidates.filter { $0.usedFraction != nil }
+        let usable = fractional.filter { ($0.usedFraction ?? 0) < 1 }
+        return (usable.isEmpty ? fractional : usable).max(by: constrainedBefore)?.id
+            ?? candidates.first?.id
+            ?? "\(preferredModel.rawValue)-hourly"
+    }
+
+    private nonisolated func matches(_ window: LimitWindow, cadence: AntigravityHeadlineLimit) -> Bool {
+        let value = "\(window.id) \(window.label)".lowercased()
+        switch cadence {
+        case .fiveHour:
+            return window.duration == 5 * 3600 ||
+                ["5h", "5-hour", "five hour", "five-hour", "hourly", "session"]
+                    .contains(where: { value.contains($0) })
+        case .weekly:
+            return window.duration == 7 * 86400 || value.contains("weekly")
+        case .automatic:
+            return true
+        }
+    }
+
+    private nonisolated func constrainedBefore(_ lhs: LimitWindow, _ rhs: LimitWindow) -> Bool {
+        let left = lhs.usedFraction ?? 0
+        let right = rhs.usedFraction ?? 0
+        if left != right { return left < right }
+        return lhs.id > rhs.id
+    }
+
+    nonisolated func resolveWeeklyID(for windows: [LimitWindow]) -> String? {
+        let preferredModel = Preferences.storedAntigravityHeadlineModel()
+        let modelCandidates = windows.filter { $0.id.hasPrefix(preferredModel.rawValue) }
+        let candidates = modelCandidates.isEmpty ? windows : modelCandidates
+        let weekly = candidates.filter { window in
+            window.duration == 7 * 86400 ||
+                window.id.lowercased().hasSuffix("-weekly") ||
+                window.label.lowercased().contains("weekly")
+        }
+        return weekly.max(by: constrainedBefore)?.id
     }
 
     /// Ask Antigravity's language server, if it is running.
@@ -146,18 +214,207 @@ actor AntigravityProvider: UsageProvider {
     /// closed is the ordinary case, not a fault, and the caller has an honest
     /// answer to fall back to.
     private func localQuota() async -> [LimitWindow]? {
-        if let bridge, let windows = try? await AntigravityBridge.quota(
-            from: bridge, session: localSession
-        ), !windows.isEmpty {
-            return windows
+        if let localQuotaOverride { return await localQuotaOverride() }
+        if let bridge {
+            do {
+                let windows = try await AntigravityBridge.quota(from: bridge, session: localSession)
+                if !windows.isEmpty { return windows }
+            } catch {
+                Log.usage.error("Antigravity localQuota bridge error: \(String(describing: error), privacy: .public)")
+            }
         }
         // Cached endpoint gone or never found: the port changes every time
         // Antigravity restarts, so a stale one is expected, not exceptional.
         guard let fresh = AntigravityBridge.discover() else {
-            bridge = nil
+            self.bridge = nil
+            Log.usage.error("Antigravity localQuota discover failed to find process")
             return nil
         }
-        bridge = fresh
-        return try? await AntigravityBridge.quota(from: fresh, session: localSession)
+        self.bridge = fresh
+        do {
+            return try await AntigravityBridge.quota(from: fresh, session: localSession)
+        } catch {
+            Log.usage.error("Antigravity localQuota fresh bridge error: \(String(describing: error), privacy: .public)")
+            return nil
+        }
+    }
+
+    /// The address Antigravity last recorded for itself, from its own OMP
+    /// store — an ordinary SQLite file, no credential involved.
+    ///
+    /// This is what replaced reading the address off the OAuth token. It is the
+    /// same account either way: OMP records whichever one Antigravity was
+    /// signed in as when it wrote the row.
+    nonisolated static func ompRecordedEmail() -> String? {
+        let dbURL = URL(fileURLWithPath: ("~/.omp/agent/agent.db" as NSString).expandingTildeInPath)
+        guard let db = SQLiteStore.open(dbURL) else { return nil }
+        defer { sqlite3_close(db) }
+
+        let rows = SQLiteStore.rows(
+            in: db,
+            sql: """
+            SELECT email FROM usage_history
+            WHERE provider = 'google-antigravity' AND email IS NOT NULL AND email != ''
+            ORDER BY recorded_at DESC, id DESC LIMIT 1
+            """
+        )
+        return rows.first.flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    /// Turns a quota summary into standard limit windows.
+    ///
+    /// Standard Antigravity exposes two groups with two windows each:
+    /// 1. "Gemini Models" -> 5-hour Limit & Weekly Limit
+    /// 2. "Claude and GPT models" -> 5-hour Limit & Weekly Limit
+    ///
+    /// Both the local language server (which already provides grouped buckets)
+    /// and direct Google Cloud Code PA `retrieveUserQuota` responses (which list
+    /// individual model buckets) are normalized into this standard 4-window structure.
+    nonisolated static func windows(in data: Data, now: Date = Date()) -> [LimitWindow] {
+        AntigravityQuotaParser.parse(data, now: now)
+    }
+
+
+    static func ompUsageWindows(forEmail email: String? = nil) -> [LimitWindow] {
+        let dbURL = URL(fileURLWithPath: ("~/.omp/agent/agent.db" as NSString).expandingTildeInPath)
+        guard let db = SQLiteStore.open(dbURL) else { return [] }
+        defer { sqlite3_close(db) }
+
+        var targetEmail = email
+        if targetEmail == nil {
+            let sql = "SELECT email FROM usage_history WHERE provider = 'google-antigravity' AND email IS NOT NULL AND email != '' ORDER BY recorded_at DESC, id DESC LIMIT 1;"
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+                if sqlite3_step(stmt) == SQLITE_ROW, let em = sqlite3_column_text(stmt, 0) {
+                    targetEmail = String(cString: em)
+                }
+                sqlite3_finalize(stmt)
+            }
+        }
+
+        let sql: String
+        if let targetEmail, !targetEmail.isEmpty {
+            sql = """
+            SELECT limit_id, label, window_label, used_fraction, resets_at
+            FROM usage_history
+            WHERE provider = 'google-antigravity' AND email = ?1
+            ORDER BY recorded_at DESC, id DESC
+            LIMIT 10;
+            """
+        } else {
+            sql = """
+            SELECT limit_id, label, window_label, used_fraction, resets_at
+            FROM usage_history
+            WHERE provider = 'google-antigravity'
+            ORDER BY recorded_at DESC, id DESC
+            LIMIT 10;
+            """
+        }
+
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(stmt) }
+
+        if let targetEmail, !targetEmail.isEmpty {
+            sqlite3_bind_text(stmt, 1, targetEmail, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        }
+
+        var latestByID: [String: (group: String, label: String, used: Double, resets: Date?)] = [:]
+
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let limitId = String(cString: sqlite3_column_text(stmt, 0))
+            let rawLabel = String(cString: sqlite3_column_text(stmt, 1))
+            let windowLabel = sqlite3_column_text(stmt, 2).map { String(cString: $0).lowercased() } ?? ""
+            let usedFraction = sqlite3_column_double(stmt, 3)
+            let resetsAtMs = sqlite3_column_type(stmt, 4) != SQLITE_NULL ? sqlite3_column_double(stmt, 4) : 0
+            let resetsAt = (resetsAtMs > 0) ? Date(timeIntervalSince1970: resetsAtMs / 1000.0) : nil
+
+            let isGemini = limitId.contains(":google:") || rawLabel.contains("Google")
+            let groupName = isGemini ? L10n.t("Gemini Models") : L10n.t("Claude and GPT models")
+            let isWeekly = windowLabel.contains("weekly")
+            let labelName = isWeekly ? L10n.t("Weekly Limit") : L10n.t("5-hour Limit")
+            let standardID = isGemini ? (isWeekly ? "gemini-weekly" : "gemini-hourly") : (isWeekly ? "3p-weekly" : "3p-hourly")
+
+            if latestByID[standardID] == nil {
+                latestByID[standardID] = (groupName, labelName, usedFraction, resetsAt)
+            }
+        }
+
+        let standardSlots: [(id: String, group: String, label: String, isWeekly: Bool)] = [
+            ("gemini-hourly", L10n.t("Gemini Models"), L10n.t("5-hour Limit"), false),
+            ("gemini-weekly", L10n.t("Gemini Models"), L10n.t("Weekly Limit"), true),
+            ("3p-hourly", L10n.t("Claude and GPT models"), L10n.t("5-hour Limit"), false),
+            ("3p-weekly", L10n.t("Claude and GPT models"), L10n.t("Weekly Limit"), true)
+        ]
+
+        var windows: [LimitWindow] = []
+        for slot in standardSlots {
+            if let item = latestByID[slot.id] {
+                windows.append(LimitWindow(
+                    id: slot.id,
+                    group: item.group,
+                    label: item.label,
+                    usedFraction: item.used,
+                    resetsAt: item.resets,
+                    duration: slot.isWeekly ? 7 * 86400 : nil
+                ))
+            } else {
+                windows.append(LimitWindow(
+                    id: slot.id,
+                    group: slot.group,
+                    label: slot.label,
+                    usedFraction: 0.0,
+                    resetsAt: nil,
+                    duration: slot.isWeekly ? 7 * 86400 : nil
+                ))
+            }
+        }
+        return windows
+    }
+
+    /// Known quota group names, so an English API value still localizes.
+    private static func quotaGroupName(_ name: String?) -> String? {
+        guard let name, !name.isEmpty else { return nil }
+        switch name {
+        case "Gemini Models": return L10n.t("Gemini Models")
+        case "Claude and GPT models": return L10n.t("Claude and GPT models")
+        default: return name
+        }
+    }
+
+    /// Known window titles, including the wording the language server uses.
+    private static func quotaWindowLabel(_ name: String) -> String {
+        var label = name
+        if label.hasSuffix(" Remaining") {
+            label = String(label.dropLast(" Remaining".count))
+        }
+        switch label {
+        case "Five Hour Limit", "5-hour Limit": return L10n.t("5-hour Limit")
+        case "Weekly Limit": return L10n.t("Weekly Limit")
+        default: return label
+        }
+    }
+
+    /// The plan's display name, for the message the cell shows.
+    static func tier(in data: Data) -> String {
+        struct Response: Decodable {
+            struct Tier: Decodable {
+                let id: String?
+                let name: String?
+                let isDefault: Bool?
+            }
+            let allowedTiers: [Tier]?
+            let currentTier: Tier?
+        }
+
+        guard let decoded = try? JSONDecoder().decode(Response.self, from: data) else {
+            return "Gemini"
+        }
+        // `currentTier` appears once a tier has been chosen; before that the
+        // default among the allowed ones is what you are on.
+        let tier = decoded.currentTier
+            ?? decoded.allowedTiers?.first(where: { $0.isDefault == true })
+            ?? decoded.allowedTiers?.first
+        return tier?.name ?? "Gemini"
     }
 }

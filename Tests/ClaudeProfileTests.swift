@@ -20,6 +20,14 @@ final class ClaudeProfileTests: XCTestCase {
         return root
     }
 
+    /// Discovery asks whether Claude Code ever filed a token for the directory.
+    /// Every test below that is about the *filename* rules says yes, so the two
+    /// conditions stay separately testable.
+    private let signedIn: (ClaudeProfile) -> Bool = { _ in true }
+
+    /// Nothing in the home directory has a token.
+    private let signedOut: (ClaudeProfile) -> Bool = { _ in false }
+
     // MARK: - Identity
 
     /// The default keeps the id it has always had, so archived readings and
@@ -41,7 +49,6 @@ final class ClaudeProfileTests: XCTestCase {
         XCTAssertEqual(profile.displayName, "Claude (work)")
         XCTAssertEqual(profile.sessionsDirectory.path, "/Users/vinz/.claude-work/sessions")
     }
-
     func testProviderIDsAreRecognised() {
         XCTAssertTrue(ClaudeProfile.isClaude(providerID: "claude"))
         XCTAssertTrue(ClaudeProfile.isClaude(providerID: "claude-work"))
@@ -72,7 +79,7 @@ final class ClaudeProfileTests: XCTestCase {
             ".claude-work": ["settings.json"],
             ".claude-alpha": ["history.jsonl"]
         ])
-        let found = ClaudeProfile.discover(home: home)
+        let found = ClaudeProfile.discover(home: home, hasAccount: signedIn)
         XCTAssertEqual(found.map(\.id), ["claude", "claude-alpha", "claude-work"])
         XCTAssertEqual(found[2].configDirectory.path, home.appendingPathComponent(".claude-work").path)
     }
@@ -85,7 +92,7 @@ final class ClaudeProfileTests: XCTestCase {
             ".claude-empty": [],
             ".claude-notes": ["README.md"]
         ])
-        XCTAssertEqual(ClaudeProfile.discover(home: home).map(\.id), ["claude"])
+        XCTAssertEqual(ClaudeProfile.discover(home: home, hasAccount: signedIn).map(\.id), ["claude"])
     }
 
     /// Any one of the files Claude Code writes on first run is enough — they
@@ -96,7 +103,7 @@ final class ClaudeProfileTests: XCTestCase {
             ".claude-b": ["projects"],
             ".claude-c": [".claude.json"]
         ])
-        XCTAssertEqual(ClaudeProfile.discover(home: home).map(\.id),
+        XCTAssertEqual(ClaudeProfile.discover(home: home, hasAccount: signedIn).map(\.id),
                        ["claude", "claude-a", "claude-b", "claude-c"])
     }
 
@@ -105,14 +112,39 @@ final class ClaudeProfileTests: XCTestCase {
         let home = try home([".claude": ["settings.json"]])
         FileManager.default.createFile(atPath: home.appendingPathComponent(".claude-work").path,
                                        contents: Data("not a directory".utf8))
-        XCTAssertEqual(ClaudeProfile.discover(home: home).map(\.id), ["claude"])
+        XCTAssertEqual(ClaudeProfile.discover(home: home, hasAccount: signedIn).map(\.id), ["claude"])
     }
 
     /// `~/.claude` has always been read whether or not it exists yet, and a
     /// fresh Mac with no Claude Code still gets the ring that says so.
     func testTheDefaultIsAlwaysPresent() throws {
         let home = try home([:])
-        XCTAssertEqual(ClaudeProfile.discover(home: home).map(\.id), ["claude"])
+        XCTAssertEqual(ClaudeProfile.discover(home: home, hasAccount: signedIn).map(\.id), ["claude"])
+    }
+
+    /// A plugin is not an account. `claude-mem` keeps its state in
+    /// `~/.claude-mem` and writes the same first-run names Claude Code does,
+    /// so the filename rules pass it and it drew a permanent "sign in to
+    /// ~/.claude-mem" ring for a limit that does not exist. No token under the
+    /// directory's own service name, no ring.
+    func testADirectoryWithNoTokenIsNotAnAccount() throws {
+        let home = try home([
+            ".claude": ["settings.json"],
+            ".claude-mem": ["sessions", "settings.json"]
+        ])
+        XCTAssertEqual(ClaudeProfile.discover(home: home, hasAccount: signedOut).map(\.id),
+                       ["claude"])
+        XCTAssertEqual(ClaudeProfile.discover(home: home, hasAccount: signedIn).map(\.id),
+                       ["claude", "claude-mem"],
+                       "the filename rules are unchanged — only the credential decides")
+    }
+
+    /// The default is read whether or not it has a token: it is the one ring
+    /// that has always been there to say "sign in".
+    func testTheDefaultSurvivesHavingNoToken() throws {
+        let home = try home([".claude": ["settings.json"]])
+        XCTAssertEqual(ClaudeProfile.discover(home: home, hasAccount: signedOut).map(\.id),
+                       ["claude"])
     }
 
     // MARK: - What the rest of the app derives from the id
@@ -126,6 +158,14 @@ final class ClaudeProfileTests: XCTestCase {
         )
         XCTAssertEqual(snapshot.statusMessage,
                        "Sign in to Claude Code in ~/.claude-work to read your usage")
+    }
+
+    /// Every profile's token is a keychain item, so every profile can be
+    /// refused and needs the "Allow access…" button.
+    func testEveryProfileUsesTheKeychain() {
+        let summary = ProviderSummary(id: "claude-work", name: "Claude (work)", glyph: .claude,
+                                      account: nil, signIn: .guidance("x"))
+        XCTAssertTrue(summary.usesKeychain)
     }
 
     /// The rate limit is per account. A penalty on the work profile must not
@@ -150,6 +190,9 @@ final class ClaudeProfileTests: XCTestCase {
         XCTAssertNotNil(archive.loadBackoffUntil(providerID: "claude"))
     }
 
+    /// Stands in for the keychain so the test below cannot reach it.
+    ///
+
     /// Two providers, one id each, both drawn: the store has no idea they are
     /// the same tool and must not collapse them.
     @MainActor
@@ -160,9 +203,17 @@ final class ClaudeProfileTests: XCTestCase {
         let home = URL(fileURLWithPath: "/Users/vinz")
         let store = UsageStore(
             providers: [
-                ClaudeCLIProvider(profile: .default(home: home)),
-                ClaudeCLIProvider(profile: ClaudeProfile(slug: "work",
-                                                        configDirectory: home.appendingPathComponent(".claude-work")))
+                // `cli: nil` throughout: this is about two profiles being two
+                // cells, and finding the machine's own Claude Code would make
+                // it about what the developer has installed rather than about
+                // the code.
+                ClaudeOAuthProvider(profile: .default(home: home),
+                                    archive: UsageArchive(defaults: defaults),
+                                    cli: nil, desktopCache: nil),
+                ClaudeOAuthProvider(profile: ClaudeProfile(slug: "work",
+                                                           configDirectory: home.appendingPathComponent(".claude-work")),
+                                    archive: UsageArchive(defaults: defaults),
+                                    cli: nil, desktopCache: nil)
             ],
             archive: UsageArchive(defaults: defaults)
         )

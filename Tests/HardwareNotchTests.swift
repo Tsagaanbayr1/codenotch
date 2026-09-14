@@ -34,22 +34,20 @@ final class HardwareNotchGeometryTests: XCTestCase {
                        "it stopped below the menu bar instead of meeting the notch")
     }
 
-    /// With nothing to merge with, covering the menu bar is pure cost.
-    func testWithoutOneItStillSitsBelowTheMenuBar() {
+    func testWithoutOneItStillReachesThePhysicalTopEdge() {
         let frame = NotchGeometry.panelFrame(for: plain, panelSize: size, edge: .top)
-        XCTAssertEqual(frame.maxY, plain.visibleFrameValue.maxY, accuracy: 0.001)
+        XCTAssertEqual(frame.maxY, plain.frameValue.maxY, accuracy: 0.001)
     }
 
-    /// Only the top edge merges. The others have nothing to merge with, and a
-    /// bottom notch still has a Dock to keep clear of.
+    /// Hardware merging only affects the top edge.
     func testTheOtherEdgesAreUnaffectedByIt() {
         XCTAssertEqual(
             NotchGeometry.panelFrame(for: notched, panelSize: size, edge: .bottom).minY,
-            notched.visibleFrameValue.minY, accuracy: 0.001
+            notched.frameValue.minY, accuracy: 0.001
         )
         XCTAssertEqual(
             NotchGeometry.panelFrame(for: notched, panelSize: CGSize(width: 300, height: 700), edge: .right).maxX,
-            notched.visibleFrameValue.maxX, accuracy: 0.001
+            notched.frameValue.maxX, accuracy: 0.001
         )
     }
 
@@ -135,6 +133,31 @@ final class MergedTopNotchTests: XCTestCase {
         m.isExpanded = false
         XCTAssertEqual(m.notchLength, NotchLayout.pillHeight, accuracy: 0.001)
         XCTAssertEqual(m.notchDepth, NotchLayout.pillWidth, accuracy: 0.001)
+    }
+
+    /// Nothing below the hardware wakes it.
+    ///
+    /// The pill's band exists because a 10pt sliver is hard to hit. The notch
+    /// is 220 by 38 and needs no help — and the band it inherited ran 34pt
+    /// below the menu bar, across the title bar of a window tiled to the
+    /// centre of the screen. Aiming at that window's close button opened the
+    /// notch on top of the button.
+    func testWhatWakesItIsExactlyTheHardwareNotch() {
+        let m = model(cells: 4)
+        m.isExpanded = false
+        XCTAssertEqual(m.wakeLength, realNotch.width, accuracy: 0.001,
+                       "the wake region is wider than the hardware")
+        XCTAssertEqual(m.wakeDepth, realNotch.height, accuracy: 0.001,
+                       "the wake region reaches below the hardware, into the window under it")
+    }
+
+    /// The pill keeps its band: it is the small target the band was made for.
+    func testThePillIsStillWokenByABandAroundIt() {
+        let m = model(cells: 4, screen: plain)
+        m.isExpanded = false
+        XCTAssertGreaterThan(m.wakeDepth, m.restingDepth,
+                             "the pill lost the band that makes it hittable")
+        XCTAssertGreaterThanOrEqual(m.wakeLength, m.restingLength)
     }
 
     func testAScreenWithoutOneInsetsNothing() {
@@ -447,10 +470,15 @@ final class OrbOnAFlushBarTests: XCTestCase {
 /// should meet the screen's frame with a corner rather than a raw edge.
 @MainActor
 final class HardwareClearanceTests: XCTestCase {
-    private func model(cells: Int = 4) -> NotchViewModel {
+    private func model(cells: Int = 4, style: NotchSurfaceStyle = .solid) -> NotchViewModel {
         let model = NotchViewModel()
         model.edge = .top
         model.isExpanded = true
+        // The solid style is the default here because `ImageRenderer` has no
+        // desktop behind it to refract, so glass renders as very little. The
+        // glass style still gets its own case: there the band is painted by a
+        // layer of its own, so it can regress on its own too.
+        model.surfaceStyle = style
         model.snapshots = (0..<cells).map { index in
             ProviderSnapshot(id: "p\(index)", displayName: "P", glyph: .claude,
                              fidelity: .official, status: .ok,
@@ -466,7 +494,19 @@ final class HardwareClearanceTests: XCTestCase {
     /// up 19pt from the top instead of 38, so the top of every ring was inside
     /// the hole — which is what "the notch is blocking the rings" looks like.
     func testTheHardwaresBandHoldsNothingButBlack() {
-        let m = model()
+        assertTheBandHoldsNothingButBlack(model())
+    }
+
+    /// The glass surface paints the band with a layer of its own, so it can go
+    /// wrong on its own: without it the cutout reads as a black rectangle set
+    /// into a sheet of glass.
+    func testTheHardwaresBandStaysBlackInTheGlassStyle() {
+        assertTheBandHoldsNothingButBlack(model(style: .glass))
+    }
+
+    private func assertTheBandHoldsNothingButBlack(
+        _ m: NotchViewModel, file: StaticString = #filePath, line: UInt = #line
+    ) {
         let size = m.notchSize
         let renderer = ImageRenderer(
             content: NotchRootView(model: m).frame(width: m.panelSize.width,
@@ -474,7 +514,7 @@ final class HardwareClearanceTests: XCTestCase {
         )
         renderer.scale = 1
         guard let image = renderer.cgImage, let rep = NSBitmapImageRep(cgImage: image).cgImage
-        else { return XCTFail("nothing rendered") }
+        else { return XCTFail("nothing rendered", file: file, line: line) }
         let bitmap = NSBitmapImageRep(cgImage: rep)
 
         let place = NotchPlacement(edge: .top, panelSize: m.panelSize)
@@ -487,7 +527,8 @@ final class HardwareClearanceTests: XCTestCase {
                 // or a label drawn where the display has a hole in it.
                 XCTAssertLessThan(
                     colour.brightnessComponent, 0.05,
-                    "something is drawn inside the hardware notch at (\(along), \(across))"
+                    "something is drawn inside the hardware notch at (\(along), \(across))",
+                    file: file, line: line
                 )
             }
         }

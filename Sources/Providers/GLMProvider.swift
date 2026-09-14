@@ -34,8 +34,12 @@ actor GLMProvider: UsageProvider {
     }
 
     nonisolated var signInRoute: SignInRoute {
-        .guidance("Usage rides on a Z.ai GLM Coding Plan key held by a coding tool — Claude "
-                  + "Code's settings.json, ZCode or OpenCode. Set one up there and the notch reads it.")
+        .guidance(L10n.t("Usage rides on a Z.ai GLM Coding Plan key held by a coding tool — Claude Code's settings.json, ZCode or OpenCode. Set one up there and the notch reads it."))
+    }
+
+    nonisolated func forgetCachedCredential() {
+        // Nothing is cached: the key is re-read from disk on every fetch,
+        // which is prompt-free, unlike a keychain read.
     }
 
     nonisolated func account() -> ProviderAccount? {
@@ -80,7 +84,9 @@ actor GLMProvider: UsageProvider {
                 fidelity: .official,
                 status: .ok,
                 windows: payload.windows,
-                headlineID: "session"
+                headlineID: "session",
+                weeklyID: "weekly",
+                plan: payload.level?.nonEmptyPlan
             )
         } catch UsageProviderError.rateLimited(let retryAfter) {
             // Bookkeeping where the answer was, not down in `fetch`: the wait
@@ -123,13 +129,8 @@ actor GLMProvider: UsageProvider {
     }
 
     /// How long to wait after a 429 — a minute, doubling per consecutive
-    /// limit, capped so it always recovers on its own.
-    ///
-    /// The server's own hint is honoured only as a *floor-raiser*. An endpoint
-    /// that answers `Retry-After: 0` is giving no guidance at all, and obeying
-    /// it literally means retrying immediately, which is what keeps you rate
-    /// limited. Anthropic's usage endpoint did exactly that, back when this app
-    /// still called it; the rule outlived it because it is the right rule.
+    /// limit, capped so it always recovers on its own. The server's own hint
+    /// is honoured only as a floor-raiser, for the reason Claude's records.
     static func backoff(forAttempt attempt: Int, retryAfter: TimeInterval?) -> TimeInterval {
         let floor: TimeInterval = 60
         let ceiling: TimeInterval = 15 * 60

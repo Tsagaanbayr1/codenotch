@@ -1,17 +1,38 @@
 import Foundation
 
-/// Identity from `~/.codex/auth.json`.
-///
-/// Codex needs no credential to *read usage* — that comes from its rollout logs
-/// — so this exists only to say whose readings these are. The address lives in
-/// the id token's claims, which is a plain base64 payload; the signature is
-/// never checked because nothing is being authorised, only labelled.
+/// Borrows Codex's local session without refreshing or changing its credentials.
 enum CodexCredentials {
-    static var authURL: URL {
-        URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".codex/auth.json")
+    struct Credential {
+        let accessToken: String
+        let accountID: String
     }
 
-    static func account(from url: URL = authURL) -> ProviderAccount? {
+    static var authURL: URL {
+        CodexProfile.default().authURL
+    }
+
+    static func load(from url: URL = authURL, now: Date = Date()) throws -> Credential {
+        struct Auth: Decodable {
+            struct Tokens: Decodable {
+                let access_token: String
+                let account_id: String
+            }
+            let tokens: Tokens
+        }
+        guard let data = try? Data(contentsOf: url),
+              let auth = try? JSONDecoder().decode(Auth.self, from: data),
+              !auth.tokens.access_token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !auth.tokens.account_id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { throw UsageProviderError.needsAuth }
+
+        if let expiry = claims(inJWT: auth.tokens.access_token)?["exp"] as? Double,
+           expiry <= now.timeIntervalSince1970 {
+            throw UsageProviderError.credentialExpired
+        }
+        return Credential(accessToken: auth.tokens.access_token, accountID: auth.tokens.account_id)
+    }
+
+    static func account(from url: URL = authURL, source: String = "Codex") -> ProviderAccount? {
         guard let data = try? Data(contentsOf: url),
               let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let tokens = root["tokens"] as? [String: Any],
@@ -23,13 +44,12 @@ enum CodexCredentials {
         return ProviderAccount(
             label: claims["email"] as? String,
             plan: auth?["chatgpt_plan_type"] as? String,
-            source: "Codex",
+            source: source,
             manageURL: URL(string: "https://chatgpt.com/#settings/Account")
         )
     }
 
-    /// The middle segment of a JWT, base64url-decoded. No verification: this is
-    /// a label, not an authorisation.
+    /// Claims supply identity labels and a local expiry hint. The server validates the token.
     static func claims(inJWT token: String) -> [String: Any]? {
         let parts = token.split(separator: ".")
         guard parts.count >= 2 else { return nil }

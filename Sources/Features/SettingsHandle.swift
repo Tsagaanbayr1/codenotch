@@ -24,6 +24,9 @@ struct SettingsOrb: View {
     /// where the two are the same object; back onto the corner when the button
     /// has had to move clear of the bar.
     var arcOffset: CGSize = .zero
+    /// How many times the gear has been asked to turn. See
+    /// `NotchViewModel.settingsSpins`.
+    var spins: Int = 0
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -58,11 +61,42 @@ struct SettingsOrb: View {
 
     private var restingTrim: ClosedRange<CGFloat> { Self.restingTrim(for: edge, convex: convex) }
 
+    /// How far the button dips under a click.
+    ///
+    /// Shallow on purpose. This is a 22pt control tucked against the bezel, and
+    /// a deeper press reads as the whole notch flinching rather than as one
+    /// button being pushed.
+    private static let squeezeScale: CGFloat = 0.84
 
+    @Environment(\.notchSurfaceStyle) private var surfaceStyle
+    @Environment(\.codenotchReduceTransparency) private var reduceTransparency
 
-    var body: some View {
-        ZStack {
-            // The resting arc, on a circle one gap inside the flare's own.
+    /// Reduce transparency means "no see-through chrome", which for the orb is
+    /// the solid style — the same precedence the Settings window applies to its
+    /// own translucent chrome.
+    private var glassy: Bool { surfaceStyle.effective == .glass && !reduceTransparency }
+
+    /// The resting arc, on a circle one gap inside the flare's own.
+    ///
+    /// On glass the arc is the material itself rather than a stroke of our
+    /// paint, so it reads as the same substance as the flare it hugs instead of
+    /// a line drawn beside it.
+    @ViewBuilder
+    private var restingArc: some View {
+        if glassy {
+            // `effective` is only ever `.glass` where `glassEffect` exists; the
+            // availability check is what tells the compiler so.
+            if #available(macOS 26.0, *) {
+                Color.clear
+                    .frame(width: 100, height: 100)
+                    .glassEffect(.regular, in: Rectangle())
+                    // The band's own inset cancels the extra stroke width here,
+                    // so this is the same circle the stroked arc follows.
+                    .frame(width: arcRadius * 2 + NotchLayout.orbStroke,
+                           height: arcRadius * 2 + NotchLayout.orbStroke)
+                    .clipShape(ArcBand(trim: restingTrim, lineWidth: NotchLayout.orbStroke))
+            }
+        } else {
             Circle()
                 .trim(from: restingTrim.lowerBound, to: restingTrim.upperBound)
                 .stroke(
@@ -70,13 +104,36 @@ struct SettingsOrb: View {
                     style: StrokeStyle(lineWidth: NotchLayout.orbStroke, lineCap: .round)
                 )
                 .frame(width: arcRadius * 2, height: arcRadius * 2)
+        }
+    }
+
+    /// The filled disc the arc becomes on hover. It is the one thing here you
+    /// press, so its glass is `interactive` and reacts to the pointer.
+    @ViewBuilder
+    private var hoverDisc: some View {
+        if glassy {
+            if #available(macOS 26.0, *) {
+                Color.clear
+                    .frame(width: 100, height: 100)
+                    .glassEffect(.regular.interactive(), in: Rectangle())
+                    .frame(width: NotchLayout.orbDiameter, height: NotchLayout.orbDiameter)
+                    .clipShape(Circle())
+            }
+        } else {
+            Circle()
+                .fill(Palette.notch)
+                .frame(width: NotchLayout.orbDiameter, height: NotchLayout.orbDiameter)
+        }
+    }
+
+    var body: some View {
+        ZStack {
+            restingArc
                 .opacity(isHovered ? 0 : 1)
                 .scaleEffect(isHovered ? 0.86 : 1)
                 .offset(arcOffset)
 
-            Circle()
-                .fill(Palette.notch)
-                .frame(width: NotchLayout.orbDiameter, height: NotchLayout.orbDiameter)
+            hoverDisc
                 .opacity(isHovered ? 1 : 0)
                 .scaleEffect(isHovered ? 1 : 1.1)
 
@@ -85,7 +142,15 @@ struct SettingsOrb: View {
                 .foregroundStyle(Palette.textPrimary)
                 .opacity(isHovered ? 1 : 0)
                 .scaleEffect(isHovered ? 1 : 0.5)
-                .rotationEffect(.degrees(isHovered ? 0 : -60))
+                // Two rotations on one glyph: the wake-up from the hover
+                // state, and a full turn per click. Summed rather than
+                // applied separately so a click mid-hover does not fight the
+                // -60 the gear is still arriving from.
+                .rotationEffect(.degrees((isHovered ? 0 : -60) + Double(spins) * 360))
+                .animation(NotchMotion.respectingReduceMotion(.spring(response: 0.55,
+                                                                      dampingFraction: 0.72),
+                                                              reduceMotion),
+                           value: spins)
         }
         // Sized to the larger of the two states, and never clipped: the arc
         // may sit well outside this frame when it has stayed back on the
@@ -98,5 +163,39 @@ struct SettingsOrb: View {
             ),
             value: isHovered
         )
+        // The press, on the same counter as the turn. A click reaches this
+        // view as one event — the panel's own hit test and the SwiftUI
+        // gesture both bump `spins`, and neither reports mouse-down and
+        // mouse-up separately — so the dip and the release are keyframed off
+        // that single tick rather than tracked from a press state that does
+        // not exist here.
+        //
+        // Down fast and back slower: a press is sharp, a release settles.
+        .keyframeAnimator(initialValue: CGFloat(1), trigger: spins) { orb, scale in
+            orb.scaleEffect(scale)
+        } keyframes: { _ in
+            SpringKeyframe(reduceMotion ? 1 : Self.squeezeScale,
+                           duration: 0.09, spring: .snappy)
+            SpringKeyframe(1, duration: 0.34, spring: .bouncy)
+        }
+    }
+}
+
+/// A segment of a circle's edge as a filled shape rather than a stroke.
+///
+/// Glass takes a shape, not a `ShapeStyle`, so the resting arc has to be an
+/// area before it can be made of the material. The circle is inset by half the
+/// line width because the glass is masked by this path *within the view's
+/// bounds*: run the band along the frame's edge and the outer half of every
+/// stroke is cut away.
+struct ArcBand: Shape {
+    let trim: ClosedRange<CGFloat>
+    let lineWidth: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        Circle()
+            .trim(from: trim.lowerBound, to: trim.upperBound)
+            .path(in: rect.insetBy(dx: lineWidth / 2, dy: lineWidth / 2))
+            .strokedPath(StrokeStyle(lineWidth: lineWidth, lineCap: .round))
     }
 }

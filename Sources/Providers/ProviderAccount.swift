@@ -20,7 +20,7 @@ struct ProviderAccount: Equatable {
 
     /// One line for the settings row.
     var summary: String {
-        [label, plan.map { $0.capitalized }, "via \(source)"]
+        [label, plan.map { $0.capitalized }, L10n.t("via \(source)")]
             .compactMap { $0 }
             .joined(separator: " · ")
     }
@@ -42,16 +42,20 @@ enum SignInRoute: Equatable {
 
     var actionTitle: String? {
         switch self {
-        case .modal(let name):     return "Sign in to \(name)"
-        case .openApp(_, let name): return "Open \(name)"
+        case .modal(let name):     return L10n.t("Sign in to \(name)")
+        case .openApp(_, let name): return L10n.t("Open \(name)")
         case .guidance:            return nil
         }
     }
 
     var explanation: String {
         switch self {
-        case .modal(let name):      return "Sign in to \(name) to read this account."
-        case .openApp(_, let name): return "Sign in with \(name) to read this account."
+        case .modal(let name):      return L10n.t("Sign in to \(name) to read this account.")
+        case .openApp(_, let name): 
+            if name == "Antigravity" {
+                return L10n.t("Ensure Antigravity IDE is running to read this account.")
+            }
+            return L10n.t("Sign in with \(name) to read this account.")
         case .guidance(let text):   return text
         }
     }
@@ -63,9 +67,9 @@ enum SignInRoute: Equatable {
     /// where to go.
     var switchHint: String {
         switch self {
-        case .modal(let name):      return "Sign out in the \(name) window to use another account."
-        case .openApp(_, let name): return "Switch accounts in \(name); the notch follows."
-        case .guidance:             return "Switch accounts in the tool that owns it; the notch follows."
+        case .modal(let name):      return L10n.t("Sign out in the \(name) window to use another account.")
+        case .openApp(_, let name): return L10n.t("Switch accounts in \(name); the notch follows.")
+        case .guidance:             return L10n.t("Switch accounts in the tool that owns it; the notch follows.")
         }
     }
 
@@ -74,11 +78,11 @@ enum SignInRoute: Equatable {
     var signOutCaveat: String {
         switch self {
         case .modal(let name):
-            return "Signs out of \(name) — the session belongs to Codenotch."
+            return L10n.t("Signs out of \(name) — the session belongs to Codenotch.")
         case .openApp(_, let name):
-            return "You stay signed in to \(name) — end that session in \(name) itself."
+            return L10n.t("You stay signed in to \(name) — end that session in \(name) itself.")
         case .guidance:
-            return "You stay signed in to the tool that owns the account."
+            return L10n.t("You stay signed in to the tool that owns the account.")
         }
     }
 }
@@ -92,7 +96,7 @@ extension UsageProvider {
     func account() -> ProviderAccount? { nil }
 
     var signInRoute: SignInRoute {
-        .guidance("Sign in with the tool that owns this account.")
+        .guidance(L10n.t("Sign in with the tool that owns this account."))
     }
 
     /// Nothing of our own to discard, by default.
@@ -101,18 +105,48 @@ extension UsageProvider {
     /// No modal of our own to show, by default — `UsageStore.signIn` falls back
     /// to the route.
     func presentSignIn() {}
+
+    /// Providers that hold nothing in memory have nothing to drop.
+    func forgetCachedCredential() {}
 }
 
 /// A provider as the settings sheet needs it.
-///
-/// There is deliberately no "can this be refused" flag here any more. Codenotch
-/// reads no keychain item for any provider — every number comes from running
-/// the owning tool or reading a file it wrote — so macOS has nothing to refuse
-/// and there is no refusal for the sheet to offer to repair.
 struct ProviderSummary: Identifiable, Equatable {
+    var kind: ProviderKind = .usage
+    var localModel: LocalRuntimeReading.Model? = nil
+    var sourceProviderID: String? = nil
+    /// The runtime a local model is loaded in, for the row's own words.
+    var runtimeName: String? = nil
+    /// Whether this provider's credential lives in the keychain, and so can be
+    /// refused. Codex still reads an ordinary file and never prompts. Cursor
+    /// does too when the editor is signed in, but `cursor-agent` files its
+    /// JWT in the login keychain — without this flag a declined prompt would
+    /// have no "Allow access…" to put the dialogue back.
+    var usesKeychain: Bool {
+        ClaudeProfile.isClaude(providerID: id) || id == "gemini" || id == "cursor"
+    }
+
     let id: String
     let name: String
     let glyph: ProviderGlyph
     let account: ProviderAccount?
     let signIn: SignInRoute
+    /// Whether macOS refused this credential on the last fetch — the one state
+    /// "Allow access…" can actually repair.
+    ///
+    /// Deliberately *not* read off the snapshot's status. A refusal leaves the
+    /// last reading standing and its status untouched, because the number is
+    /// still true; the refusal itself is remembered separately by the store.
+    /// Offering to re-ask macOS for a credential it is already handing over is a
+    /// cure for an illness the provider does not have, and a button that does
+    /// nothing is indistinguishable from a broken one.
+    var wasRefusedAccess: Bool = false
+    /// Whether this provider's saved login has aged out and Codenotch could not
+    /// renew it, so someone has to run the tool that owns it.
+    ///
+    /// Deliberately *not* read off the snapshot's status, for the same reason
+    /// `wasRefusedAccess` is not: an expired token leaves the last reading in
+    /// place and looking fine. Tying the warning to "is there a reading" would
+    /// hide it behind exactly the stale number it is warning about.
+    var needsSignInRenewal: Bool = false
 }

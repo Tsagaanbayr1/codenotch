@@ -1,21 +1,61 @@
 import Foundation
 
+enum ResetTimeFormat: String, CaseIterable, Identifiable {
+    case automatic
+    case remaining
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .automatic: return L10n.t("Reset date")
+        case .remaining: return L10n.t("Time remaining")
+        }
+    }
+
+    var explanation: String {
+        switch self {
+        case .automatic:
+            return L10n.t("Minutes under an hour; otherwise the reset date and time.")
+        case .remaining:
+            return L10n.t("Time until usage resets, such as 3 Days 3h or 3h 20m.")
+        }
+    }
+}
+
 /// "Resets in 51 min" under an hour, "Resets Thu 12:00 AM" within the week,
 /// "Resets Sep 28" beyond it.
 enum ResetCopy {
-    static func text(for resetsAt: Date, now: Date = Date(), calendar: Calendar = .current) -> String {
+    static func text(for resetsAt: Date, now: Date = Date(), calendar: Calendar = .current,
+                     format: ResetTimeFormat = .automatic, locale: Locale = L10n.locale) -> String {
         let seconds = resetsAt.timeIntervalSince(now)
-        guard seconds > 0 else { return "Resetting…" }
+        guard seconds > 0 else { return L10n.t("Resetting…", locale: locale) }
+
+        if format == .remaining {
+            let minutes = max(1, Int((seconds / 60).rounded()))
+            let hours = minutes / 60
+            let days = hours / 24
+            if days > 0 {
+                return days == 1
+                    ? L10n.t("Resets in \(days) Day \(hours % 24)h", locale: locale)
+                    : L10n.t("Resets in \(days) Days \(hours % 24)h", locale: locale)
+            }
+            if hours > 0 {
+                return L10n.t("Resets in \(hours)h \(minutes % 60)m", locale: locale)
+            }
+            return L10n.t("Resets in \(minutes) min", locale: locale)
+        }
 
         // Rounding, not truncation, so 50m40s reads as 51 rather than 50. A
         // value that rounds up to 60 falls through to the absolute form, so
         // "Resets in 60 min" never appears.
         let minutes = Int((seconds / 60).rounded())
         if minutes < 60 {
-            return "Resets in \(max(1, minutes)) min"
+            return L10n.t("Resets in \(max(1, minutes)) min", locale: locale)
         }
 
         let formatter = formatter(for: calendar)
+        formatter.locale = locale
 
         // A weekday only identifies a day inside the coming week. Codex's
         // monthly window resets 26 days out, and "Resets Mon 3:55 PM" read as
@@ -25,15 +65,18 @@ enum ResetCopy {
             // Day and month only, matching how the vendors write it. A time
             // that far out is noise: nobody plans around 3:55 PM in four weeks.
             formatter.setLocalizedDateFormatFromTemplate("MMM d")
-            return "Resets \(formatter.string(from: resetsAt))"
+            return L10n.t("Resets \(formatter.string(from: resetsAt))", locale: locale)
         }
 
-        // A literal pattern rather than a localised template: the weekday and
-        // AM/PM still come from the locale, but the separator stays a colon.
-        // The template form yields "4.50 PM" in some regions, and both the
-        // design frame and Claude's own usage panel write "4:50 PM".
-        formatter.dateFormat = "E h:mm a"
-        return "Resets \(formatter.string(from: resetsAt))"
+        // `j`, not `h`: a literal hour symbol in a template pins the clock to
+        // twelve hours whatever the region, so everywhere that writes 00:00
+        // rather than 12:00 AM — most of Europe, Asia and Latin America — read
+        // "Resets mer. 12:00 AM" here while every other clock on the Mac said
+        // 00:00. `j` asks the locale, which also carries the "24-Hour Time"
+        // switch in System Settings. Regions that write AM/PM keep it, so
+        // English is still "Thu 12:00 AM".
+        formatter.setLocalizedDateFormatFromTemplate("E j:mm")
+        return L10n.t("Resets \(formatter.string(from: resetsAt))", locale: locale)
     }
 
     /// A formatter that renders in the given calendar's own zone.
@@ -47,7 +90,7 @@ enum ResetCopy {
         let formatter = DateFormatter()
         formatter.calendar = calendar
         formatter.timeZone = calendar.timeZone
-        formatter.locale = .current
+        formatter.locale = calendar.locale ?? L10n.locale
         return formatter
     }
 
