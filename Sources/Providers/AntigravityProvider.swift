@@ -20,15 +20,8 @@ actor AntigravityProvider: UsageProvider {
     // choice, and changing it would silently discard both.
     nonisolated let displayName = "Antigravity"
     nonisolated let glyph = ProviderGlyph.antigravity
-
-    /// The production host. Antigravity itself also calls a `daily-` variant,
-    /// which answers 403 to this token — so it is not a fallback, it is a
-    /// different audience.
-    private let endpoint = URL(string: "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist")!
-    /// The real usage figure — served by Cloud Code PA.
-    private let quotaEndpoint = URL(string: "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary")!
-    private let session: URLSession
-    /// A second session, trusting loopback only, for the local language server.
+    /// Trusts loopback only, for the local language server. It is the only
+    /// network session this provider has left, and it never leaves the machine.
     private let localSession: URLSession
     /// Re-discovering the port and token means spawning `ps` and `lsof`, which
     /// is not something to do every minute. Cached until it stops working.
@@ -49,9 +42,7 @@ actor AntigravityProvider: UsageProvider {
     /// would otherwise go uncovered.
     private let localQuotaOverride: (@Sendable () async -> [LimitWindow]?)?
 
-    init(session: URLSession = .shared,
-         localQuota: (@Sendable () async -> [LimitWindow]?)? = nil) {
-        self.session = session
+    init(localQuota: (@Sendable () async -> [LimitWindow]?)? = nil) {
         self.localQuotaOverride = localQuota
         self.localSession = URLSession(configuration: .ephemeral,
                                        delegate: LocalhostTrust(),
@@ -63,20 +54,22 @@ actor AntigravityProvider: UsageProvider {
     }
 
     /// Reached only from "Allow access…", so it may let the next read prompt.
-    nonisolated func forgetCachedCredential() { AntigravityCredentials.askAgain() }
-
+    /// Whose readings these are, without opening anything of theirs.
+    ///
+    /// The address used to come off the token, with the plan beside it. Neither
+    /// is readable now and neither is worth a keychain prompt, so the address
+    /// is taken from Antigravity's own OMP store where it has recorded one —
+    /// an ordinary file — and the row falls back to naming the source alone.
     nonisolated func account() -> ProviderAccount? {
-        if AntigravityCredentials.isSignedIn(), let held = AntigravityCredentials.held {
-            let email = held.email
-            let plan = held.authMethod == "consumer" ? L10n.t("Personal") : held.authMethod
+        if let email = Self.ompRecordedEmail() {
             return ProviderAccount(
                 label: email,
-                plan: plan,
+                plan: nil,   // nothing local names the plan
                 source: "Antigravity",
                 manageURL: URL(string: "https://antigravity.google")
             )
         }
-        
+
         if UserDefaults.standard.bool(forKey: "AntigravityEverBridged") {
             return ProviderAccount(
                 label: L10n.t("Local Session"),
@@ -114,19 +107,19 @@ actor AntigravityProvider: UsageProvider {
             throw UsageProviderError.credentialExpired
         }
 
-        // 1. Try reading credentials and asking Google Cloud Code PA directly
-        let credentials = try? AntigravityCredentials.load()
-        if let credentials,
-           let windows = try? await quota(token: credentials.accessToken, project: credentials.projectId),
-           !windows.isEmpty {
-            return ProviderSnapshot(id: id, displayName: displayName, glyph: glyph,
-                                    fidelity: .official, status: .ok, windows: windows,
-                                    headlineID: resolveHeadlineID(for: windows),
-                                    weeklyID: resolveWeeklyID(for: windows))
-        }
-
-        // 2. Fallback to OMP SQLite store if offline or direct call fails
-        let ompWindows = Self.ompUsageWindows(forEmail: credentials?.email)
+        // The direct call to Google Cloud Code PA used to sit here, reading the
+        // OAuth token out of the login keychain to make it. Both are gone:
+        // Codenotch reads no credential of anyone else's, for any provider.
+        //
+        // Little is lost. The call only ever answered for a licensed account,
+        // and the language server above outranked it whenever both could
+        // answer — so this path ran exactly when Antigravity was closed, which
+        // is also when its numbers are least likely to have moved.
+        //
+        // Antigravity's own OMP store, which is an ordinary file, is asked
+        // instead. Passing no address makes it read the most recent one it has
+        // recorded itself, which is the same account the token would have named.
+        let ompWindows = Self.ompUsageWindows()
         if !ompWindows.isEmpty {
             return ProviderSnapshot(id: id, displayName: displayName, glyph: glyph,
                                     fidelity: .official, status: .ok, windows: ompWindows,
@@ -246,23 +239,26 @@ actor AntigravityProvider: UsageProvider {
         }
     }
 
-    /// Ask for the account's quota, returning nil when it is not allowed to.
+    /// The address Antigravity last recorded for itself, from its own OMP
+    /// store — an ordinary SQLite file, no credential involved.
     ///
-    /// A free or personal account answers 403 #3501, "You do not have a valid
-    private func quota(token: String, project: String? = nil) async throws -> [LimitWindow]? {
-        var request = URLRequest(url: quotaEndpoint)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("antigravity/hub/2.8.0 (aidev_client; os_type=darwin; arch=arm64; cl=963137146)", forHTTPHeaderField: "User-Agent")
-        request.setValue("ideType=IDE_UNSPECIFIED,platform=PLATFORM_UNSPECIFIED,pluginType=GEMINI", forHTTPHeaderField: "Client-Metadata")
-        let bodyObj: [String: Any] = (project != nil && !project!.isEmpty) ? ["project": project!] : [:]
-        request.httpBody = try? JSONSerialization.data(withJSONObject: bodyObj)
-        request.timeoutInterval = 15
+    /// This is what replaced reading the address off the OAuth token. It is the
+    /// same account either way: OMP records whichever one Antigravity was
+    /// signed in as when it wrote the row.
+    nonisolated static func ompRecordedEmail() -> String? {
+        let dbURL = URL(fileURLWithPath: ("~/.omp/agent/agent.db" as NSString).expandingTildeInPath)
+        guard let db = SQLiteStore.open(dbURL) else { return nil }
+        defer { sqlite3_close(db) }
 
-        guard let (data, response) = try? await session.data(for: request),
-              (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
-        return Self.windows(in: data)
+        let rows = SQLiteStore.rows(
+            in: db,
+            sql: """
+            SELECT email FROM usage_history
+            WHERE provider = 'google-antigravity' AND email IS NOT NULL AND email != ''
+            ORDER BY recorded_at DESC, id DESC LIMIT 1
+            """
+        )
+        return rows.first.flatMap { $0.isEmpty ? nil : $0 }
     }
 
     /// Turns a quota summary into standard limit windows.

@@ -32,6 +32,32 @@ enum ReleaseNotes {
     static var all: [ReleaseNote] {
         [
             ReleaseNote(
+                version: "1.11.0",
+                headline: L10n.t("No keychain access anywhere in the app: your saved logins stay yours."),
+                changes: [
+                    ReleaseNote.Change(
+                        title: L10n.t("macOS is never asked for a saved login"),
+                        detail: L10n.t("Codenotch made keychain requests for Claude Code, Antigravity and Cursor. It makes none now, for any provider — so the \"Codenotch wants to use your confidential information\" dialogue cannot appear, and there is no access to grant or decline.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("Claude Code is read by running Claude Code"),
+                        detail: L10n.t("Claude Desktop's cache first, then `claude \"/usage\"` — the same command you can run in a terminal, using its own login. The direct call to Anthropic's endpoint with your OAuth token is gone.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("Antigravity is read through its own language server"),
+                        detail: L10n.t("The same source its own usage panel uses, which needs nothing from us. Google's direct quota call went with the token it required; it only ever answered for a licensed account, and the language server outranked it whenever both could answer.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("Your own keys are still yours to save"),
+                        detail: L10n.t("Ollama and LM Studio keys you type into Settings are still stored in your keychain. Those are Codenotch's own items, written at your request — the opposite of reading another app's login.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("What this costs"),
+                        detail: L10n.t("With Claude Desktop closed and Claude Code not installed, the Claude card now says so instead of showing a number. Cursor needs the editor: a cursor-agent login on its own is no longer read. Antigravity's plan name is gone, since only its token carried it.")
+                    ),
+                ]
+            ),
+            ReleaseNote(
                 version: "1.10.0",
                 headline: L10n.t("Tells you when a limit resets or runs out, speaks Russian, and reads Kimi."),
                 changes: [

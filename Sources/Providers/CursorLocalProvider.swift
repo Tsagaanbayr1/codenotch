@@ -34,12 +34,10 @@ actor CursorLocalProvider: UsageProvider {
 
     nonisolated func account() -> ProviderAccount? { CursorCredentials.account() }
 
-    nonisolated func forgetCachedCredential() { CursorCredentials.forgetCachedAgent() }
-
     func fetchSnapshot() async throws -> ProviderSnapshot {
         // Re-read every time: the editor rotates this, and holding a stale copy
-        // would mean signing ourselves out for no reason. The agent token is
-        // cached inside `CursorAgentKeychain` so the keychain is not.
+        // would mean signing ourselves out for no reason. It is an ordinary
+        // SQLite file, so re-reading costs nothing and can prompt for nothing.
         let credentials = try CursorCredentials.load()
 
         var request = URLRequest(url: endpoint)
@@ -51,11 +49,9 @@ actor CursorLocalProvider: UsageProvider {
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
 
         if status == 401 || status == 403 {
-            // A rejected token is the one signal the copy in hand is wrong
-            // despite not having expired — signing into a different CLI
-            // account replaces the keychain item. Drop it so the next read
-            // asks macOS again.
-            CursorCredentials.forgetCachedAgent()
+            // Nothing to drop: the session is read fresh from the editor's own
+            // store on every fetch, so a rejection simply means the editor is
+            // signed out — which is what `needsAuth` says.
             throw UsageProviderError.needsAuth
         }
         guard (200..<300).contains(status) else {

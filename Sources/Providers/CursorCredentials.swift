@@ -79,13 +79,15 @@ struct CursorCredentials {
     /// Editor first. The CLI session is only reached when the editor has
     /// nothing to borrow — otherwise a laptop with both would flip between
     /// accounts depending on which file we happened to read.
+    /// The editor's own store, and nothing else.
+    ///
+    /// `cursor-agent` files a JWT in the login keychain, and this used to fall
+    /// back to it when the editor was absent. That path is gone: Codenotch
+    /// reads no credential out of the keychain, for any provider. What it costs
+    /// is real and worth stating — someone who drives Cursor only through
+    /// `cursor-agent`, with the editor never installed, no longer gets a ring.
     static func load() throws -> CursorCredentials {
-        do {
-            return try load(from: storeURL)
-        } catch UsageProviderError.needsAuth {
-            return try session(fromAgentToken: try CursorAgentKeychain.load(),
-                               configURL: agentConfigURL)
-        }
+        try load(from: storeURL)
     }
 
     /// Editor store only. Tests, and the combined loader above, pin the path
@@ -138,13 +140,13 @@ struct CursorCredentials {
         if editorInstalled {
             return .openApp(bundleID: bundleID, name: "Cursor")
         }
+        // The editor, and only the editor. `cursor-agent login` files its JWT
+        // in the login keychain, which this app no longer opens for anything.
         return .guidance(
-            "Run `cursor-agent login` once — the notch reads that session. "
-            + "The Cursor editor works the same way, if you have it."
+            "Install Cursor and sign in — the notch reads the editor's own "
+            + "session from its local store, never a saved login."
         )
     }
-
-    static func forgetCachedAgent() { CursorAgentKeychain.forgetCached() }
 
     /// The cookie's left half. `authId` is the WorkOS subject the editor
     /// itself stores as `stripeMembershipAuthId`. Numeric `userId` also works
@@ -241,57 +243,3 @@ struct CursorCredentials {
     }
 }
 
-/// The JWT `cursor-agent login` files in the login keychain.
-///
-/// Held until the item moves, for the reason spelled out in `CredentialCache`:
-/// every data read can prompt, and an unchanged item cannot produce a
-/// different token. Refreshing is left to the CLI.
-enum CursorAgentKeychain {
-    static let service = "cursor-access-token"
-    static let account = "cursor-user"
-
-    private static let cache = CredentialCache<String> {
-        CursorCredentials.agentTokenIsExpired($0)
-    }
-
-    static func load() throws -> String {
-        try cache.value(
-            itemModifiedAt: { KeychainItem.modifiedAt(service: service, account: account) },
-            reload: read
-        )
-    }
-
-    static func forgetCached() { cache.forget() }
-
-    /// Newest item under this service and account, then a targeted data read.
-    /// Same two-step as Claude Code: attributes are free, the secret is not,
-    /// and `kSecMatchLimitOne` has no ordering if a rotation left duplicates.
-    static func read() throws -> String {
-        guard let winner = KeychainItem.newest(service: service, account: account) else {
-            Log.usage.error("cursor-agent keychain read failed: no item under \(service, privacy: .public)")
-            throw UsageProviderError.needsAuth
-        }
-
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching([
-            kSecClass: kSecClassGenericPassword,
-            kSecValuePersistentRef: winner.persistentRef,
-            kSecReturnData: true,
-            kSecMatchLimit: kSecMatchLimitOne
-        ] as CFDictionary, &item)
-
-        guard status == errSecSuccess, let data = item as? Data else {
-            Log.usage.error("cursor-agent keychain read failed: OSStatus \(status)")
-            if ClaudeCredentials.wasTransient(status) { throw UsageProviderError.credentialExpired }
-            throw ClaudeCredentials.wasRefused(status)
-                ? UsageProviderError.accessDenied
-                : UsageProviderError.needsAuth
-        }
-
-        guard let token = String(data: data, encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-              !token.isEmpty
-        else { throw UsageProviderError.needsAuth }
-        return token
-    }
-}
