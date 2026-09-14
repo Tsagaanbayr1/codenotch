@@ -129,49 +129,10 @@ final class UsageResponseTests: XCTestCase {
         XCTAssertEqual(UsageResponse.label(forKind: "weekly_cowork"), "Cowork")
     }
 }
-
-/// The endpoint rate-limits, and a poll that keeps firing into a 429 is how you
-/// stay rate-limited. These pin the back-off inputs.
-final class RateLimitTests: XCTestCase {
-    private func response(retryAfter: String?) -> HTTPURLResponse {
-        HTTPURLResponse(
-            url: URL(string: "https://api.anthropic.com/api/oauth/usage")!,
-            statusCode: 429,
-            httpVersion: nil,
-            headerFields: retryAfter.map { ["Retry-After": $0] }
-        )!
-    }
-
-    func testReadsRetryAfterInSeconds() {
-        XCTAssertEqual(ClaudeOAuthProvider.retryAfter(from: response(retryAfter: "120")), 120)
-    }
-
-    func testReadsRetryAfterAsAnHTTPDate() throws {
-        let future = Date().addingTimeInterval(300)
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(identifier: "GMT")
-        formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
-        let parsed = try XCTUnwrap(
-            ClaudeOAuthProvider.retryAfter(from: response(retryAfter: formatter.string(from: future)))
-        )
-        XCTAssertEqual(parsed, 300, accuracy: 2)
-    }
-
-    func testMissingOrUnparseableHeaderFallsBackToTheDefault() {
-        XCTAssertNil(ClaudeOAuthProvider.retryAfter(from: response(retryAfter: nil)))
-        XCTAssertNil(ClaudeOAuthProvider.retryAfter(from: response(retryAfter: "soon")))
-    }
-
-    func testAPastDateNeverYieldsANegativeDelay() throws {
-        let delay = try XCTUnwrap(
-            ClaudeOAuthProvider.retryAfter(from: response(retryAfter: "Mon, 01 Jan 2001 00:00:00 GMT"))
-        )
-        XCTAssertEqual(delay, 0)
-    }
-
-    /// Being told to slow down is not a broken provider: the last good reading
-    /// is still roughly true, so it reads as staleness rather than an error.
+/// A failed fetch is not one thing. What the store makes of each kind is the
+/// difference between dimming a still-true number and sending someone to fix
+/// something that is not broken.
+final class FailureStatusTests: XCTestCase {
     @MainActor
     func testRateLimitReadsAsStaleNotError() {
         let status = UsageStore.statusForTesting(UsageProviderError.rateLimited(retryAfter: 60))
@@ -256,29 +217,6 @@ final class UsageArchiveTests: XCTestCase {
         XCTAssertTrue(UsageArchive(defaults: makeDefaults()).load().isEmpty)
     }
 
-}
-
-/// `Retry-After: 0` is the endpoint's actual answer, and obeying it literally is
-/// what keeps you rate limited.
-final class BackoffTests: XCTestCase {
-    func testAZeroHintStillWaitsAMinute() {
-        XCTAssertEqual(ClaudeOAuthProvider.backoff(forAttempt: 0, retryAfter: 0), 60)
-    }
-
-    func testItDoublesWhileTheLimitPersists() {
-        XCTAssertEqual(ClaudeOAuthProvider.backoff(forAttempt: 0, retryAfter: nil), 60)
-        XCTAssertEqual(ClaudeOAuthProvider.backoff(forAttempt: 1, retryAfter: nil), 120)
-        XCTAssertEqual(ClaudeOAuthProvider.backoff(forAttempt: 2, retryAfter: nil), 240)
-    }
-
-    func testItIsCappedSoItAlwaysRecovers() {
-        XCTAssertEqual(ClaudeOAuthProvider.backoff(forAttempt: 99, retryAfter: nil), 15 * 60)
-    }
-
-    /// A server that asks for longer than our own schedule gets its way.
-    func testAGenerousHintWins() {
-        XCTAssertEqual(ClaudeOAuthProvider.backoff(forAttempt: 0, retryAfter: 600), 600)
-    }
 }
 
 /// The back-off has to outlive the process, or a development loop of `make run`

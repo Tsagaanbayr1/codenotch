@@ -702,7 +702,8 @@ final class UsageStore: ObservableObject {
             // and simply ages. `degraded` handles that; this is only what a
             // provider with nothing to show says.
             return .error("no response")
-        case UsageProviderError.nothingMetered(let why):
+        case UsageProviderError.nothingMetered(let why),
+             UsageProviderError.unavailable(let why):
             return .unsupported(why)
         case UsageProviderError.badResponse(let code):
             return .error("HTTP \(code)")

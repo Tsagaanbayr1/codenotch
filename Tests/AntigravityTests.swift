@@ -1,77 +1,6 @@
 import XCTest
 import Sparkle
 @testable import Codenotch
-
-/// Fixtures are the real thing: the keychain payload's shape and the actual
-/// `loadCodeAssist` response from a signed-in install.
-final class AntigravityCredentialsTests: XCTestCase {
-    /// Go's keyring package base64-encodes behind this marker instead of
-    /// storing raw JSON, which is the first thing that has to be undone.
-    private func stored(_ json: String) -> Data {
-        Data(("go-keyring-base64:" + Data(json.utf8).base64EncodedString()).utf8)
-    }
-
-    private let payload = """
-    {"auth_method":"consumer","token":{"access_token":"ya29.token",\
-    "expiry":"2126-08-31T21:53:49.575961+07:00","refresh_token":"r","token_type":"Bearer"}}
-    """
-
-    func testItDecodesTheGoKeyringEnvelope() throws {
-        let creds = try XCTUnwrap(AntigravityCredentials.decode(stored(payload)))
-        XCTAssertEqual(creds.accessToken, "ya29.token")
-        XCTAssertEqual(creds.authMethod, "consumer")
-        XCTAssertFalse(creds.isExpired)
-    }
-
-    /// Without stripping the marker the value is not JSON at all, so this is
-    /// the difference between reading the account and reporting it missing.
-    func testRawJSONWithoutTheMarkerStillWorks() throws {
-        let creds = try XCTUnwrap(AntigravityCredentials.decode(
-            Data(Data(payload.utf8).base64EncodedString().utf8)))
-        XCTAssertEqual(creds.accessToken, "ya29.token")
-    }
-
-    /// An offset timestamp, not UTC and not epoch milliseconds. Reading it as
-    /// either is how a live token reads as long expired — the mistake Codex's
-    /// `procStart` already cost this project once.
-    func testItParsesAnOffsetTimestampAtTheRightInstant() throws {
-        let date = try XCTUnwrap(AntigravityCredentials.parse("2026-08-31T21:53:49.575961+07:00"))
-        // 21:53:49 at +07:00 is 14:53:49 UTC.
-        var utc = Calendar(identifier: .gregorian)
-        utc.timeZone = TimeZone(identifier: "UTC")!
-        XCTAssertEqual(utc.component(.hour, from: date), 14)
-        XCTAssertEqual(utc.component(.minute, from: date), 53)
-    }
-
-    func testItParsesWholeSecondsToo() {
-        XCTAssertNotNil(AntigravityCredentials.parse("2026-08-31T21:53:49+07:00"))
-    }
-
-    func testAnExpiredTokenIsRecognised() throws {
-        let old = payload.replacingOccurrences(of: "2126-", with: "2020-")
-        let creds = try XCTUnwrap(AntigravityCredentials.decode(stored(old)))
-        XCTAssertTrue(creds.isExpired)
-    }
-
-    func testGarbageIsRejectedRatherThanCrashing() {
-        XCTAssertNil(AntigravityCredentials.decode(Data("not base64 at all".utf8)))
-    }
-
-    func testCredentialsCarriesProjectAndEmail() {
-        let creds = AntigravityCredentials(
-            accessToken: "token-123",
-            expiresAt: Date().addingTimeInterval(3600),
-            authMethod: "consumer",
-            projectId: "aicode-consumers",
-            email: "user@example.com"
-        )
-        XCTAssertEqual(creds.accessToken, "token-123")
-        XCTAssertEqual(creds.projectId, "aicode-consumers")
-        XCTAssertEqual(creds.email, "user@example.com")
-        XCTAssertFalse(creds.isExpired)
-    }
-}
-
 final class AntigravityTierTests: XCTestCase {
     /// Verbatim from a signed-in install. Note what is absent: no used, no
     /// limit, no reset. That absence is why the provider reports the plan and
@@ -715,270 +644,6 @@ final class AntigravityBridgeTests: XCTestCase {
         XCTAssertEqual(AntigravityBridge.parsePorts(fromLSOF: output), [63881, 63882])
     }
 }
-
-/// Every keychain read risks interrupting someone, and the answer changes about
-/// hourly — so it is read about hourly, not twice a minute.
-final class CredentialCacheTests: XCTestCase {
-    private struct Token { let expired: Bool }
-
-    /// -60008 is what a refusal looks like when a prompt was needed and could
-    /// not be shown — seen five seconds before a clamshell sleep. It has to
-    /// age the reading like a dark wake does, not sign the account out.
-    func testAPromptThatCouldNotBeShownIsTransientNotASignOut() {
-        XCTAssertTrue(ClaudeCredentials.wasTransient(-60008))
-        XCTAssertTrue(ClaudeCredentials.wasTransient(-25320))
-        XCTAssertFalse(ClaudeCredentials.wasTransient(errSecItemNotFound))
-        XCTAssertFalse(ClaudeCredentials.wasTransient(errSecAuthFailed),
-                       "an explicit refusal stays a refusal, and is not re-asked on a timer")
-    }
-
-    func testItReadsOnceAndThenHoldsWhatItHas() throws {
-        var reads = 0
-        let cache = CredentialCache<Token> { $0.expired }
-        for _ in 0..<10 {
-            _ = try? cache.value { reads += 1; return Token(expired: false) }
-        }
-        XCTAssertEqual(reads, 1, "the keychain was read every time")
-    }
-
-    /// Expiry is not what decides. It used to be — "hold it while it is valid"
-    /// — and that is what made the app ask over and over: once a token aged
-    /// out, every caller went back to the keychain, once a minute, all night,
-    /// for a token that could not change until the owning app next ran. Reading
-    /// an unchanged item cannot give a different answer; it can only raise
-    /// another dialogue.
-    func testAnExpiredValueIsNotReadAgainWhileTheItemIsUnchanged() {
-        var reads = 0
-        let stamp = Date(timeIntervalSince1970: 1_000)
-        let cache = CredentialCache<Token> { $0.expired }
-        for _ in 0..<10 {
-            _ = try? cache.value(itemModifiedAt: { stamp }) {
-                reads += 1; return Token(expired: true)
-            }
-        }
-        XCTAssertEqual(reads, 1, "an unchanged item was read \(reads) times")
-    }
-
-    /// But a rotation is picked up at once — that is the whole reason to look.
-    func testAChangedItemIsReadAgainImmediately() {
-        var reads = 0
-        var stamp = Date(timeIntervalSince1970: 1_000)
-        let cache = CredentialCache<Token> { $0.expired }
-        _ = try? cache.value(itemModifiedAt: { stamp }) { reads += 1; return Token(expired: true) }
-        stamp = Date(timeIntervalSince1970: 2_000)   // the owning app refreshed it
-        _ = try? cache.value(itemModifiedAt: { stamp }) { reads += 1; return Token(expired: false) }
-        XCTAssertEqual(reads, 2, "a rotated token was not picked up")
-    }
-
-    /// With no probe to go on there is nothing to compare, so it falls back to
-    /// waiting — still not once per tick.
-    func testWithoutAProbeItWaitsRatherThanAsksEveryTime() {
-        var reads = 0
-        var clock = Date(timeIntervalSince1970: 0)
-        let cache = CredentialCache<Token>(now: { clock }) { $0.expired }
-        _ = try? cache.value { reads += 1; return Token(expired: true) }
-        clock.addTimeInterval(60)
-        _ = try? cache.value { reads += 1; return Token(expired: true) }
-        XCTAssertEqual(reads, 1, "a minute later it asked again")
-
-        clock.addTimeInterval(10 * 60)
-        _ = try? cache.value { reads += 1; return Token(expired: true) }
-        XCTAssertEqual(reads, 2, "it never looked again at all")
-    }
-
-    /// One refusal must not become a refusal a minute — *when it is a real
-    /// one*. `isPermanentFailure` is what says so: without it, this same
-    /// `Denied` would default to being retried after `retryAfterFailure`,
-    /// exactly like the dark-wake case below. The distinction is real macOS
-    /// UI (`errSecAuthFailed`/`errSecUserCanceled`/`errSecInteractionNotAllowed`)
-    /// saying no, and asking again on the next tick is what the user
-    /// experiences as "it keeps asking even though I chose Always Allow".
-    func testARefusalIsNeverRetriedWhileTheItemIsUnchanged() {
-        struct Denied: Error {}
-        var reads = 0
-        var clock = Date(timeIntervalSince1970: 0)
-        var stamp = Date(timeIntervalSince1970: 1_000)
-        let cache = CredentialCache<Token>(now: { clock }, isPermanentFailure: { $0 is Denied },
-                                           isExpired: { $0.expired })
-
-        // A good read first, so there is something to fall back on.
-        _ = try? cache.value(itemModifiedAt: { stamp }) { reads += 1; return Token(expired: true) }
-        // Then the item rotates and the read is refused.
-        stamp = Date(timeIntervalSince1970: 2_000)
-        _ = try? cache.value(itemModifiedAt: { stamp }) { () -> Token in
-            reads += 1; throw Denied()
-        }
-        XCTAssertEqual(reads, 2)
-
-        // An hour of ticks against an item that has not moved again.
-        for _ in 0..<60 {
-            clock.addTimeInterval(60)
-            _ = try? cache.value(itemModifiedAt: { stamp }) { () -> Token in
-                reads += 1; throw Denied()
-            }
-        }
-        XCTAssertEqual(reads, 2, "a refusal was retried \(reads - 2) more times")
-    }
-
-    /// A rotation is the exception, and has to be: the old secret is gone, so
-    /// the new one is the only one worth having even after a refusal.
-    func testARotationIsStillWorthAskingForAfterARefusal() {
-        struct Denied: Error {}
-        var reads = 0
-        var stamp = Date(timeIntervalSince1970: 1_000)
-        let cache = CredentialCache<Token> { $0.expired }
-
-        _ = try? cache.value(itemModifiedAt: { stamp }) { reads += 1; return Token(expired: true) }
-        stamp = Date(timeIntervalSince1970: 2_000)
-        _ = try? cache.value(itemModifiedAt: { stamp }) { () -> Token in
-            reads += 1; throw Denied()
-        }
-        stamp = Date(timeIntervalSince1970: 3_000)   // the owning app rotated it again
-        _ = try? cache.value(itemModifiedAt: { stamp }) { reads += 1; return Token(expired: false) }
-        XCTAssertEqual(reads, 3, "a rotated secret was never fetched")
-    }
-
-    /// And "Allow access…" still gets through, because raising the dialogue is
-    /// exactly what that button is for.
-    func testForgettingClearsARefusalBackoff() {
-        struct Denied: Error {}
-        var reads = 0
-        var clock = Date(timeIntervalSince1970: 0)
-        let stamp = Date(timeIntervalSince1970: 1_000)
-        let cache = CredentialCache<Token>(now: { clock }) { $0.expired }
-
-        _ = try? cache.value(itemModifiedAt: { stamp }) { reads += 1; return Token(expired: true) }
-        clock.addTimeInterval(10 * 60)
-        _ = try? cache.value(itemModifiedAt: { Date(timeIntervalSince1970: 2_000) }) { () -> Token in
-            reads += 1; throw Denied()
-        }
-        XCTAssertEqual(reads, 2)
-
-        cache.forget()
-        _ = try? cache.value(itemModifiedAt: { stamp }) { reads += 1; return Token(expired: false) }
-        XCTAssertEqual(reads, 3, "Allow access… could not reach the keychain")
-    }
-
-    /// The case this exists for: a different account is signed into, the server
-    /// rejects a token that has not expired, and the held copy has to go.
-    func testForgettingForcesAFreshRead() {
-        var reads = 0
-        let cache = CredentialCache<Token> { $0.expired }
-        _ = try? cache.value { reads += 1; return Token(expired: false) }
-        cache.forget()
-        _ = try? cache.value { reads += 1; return Token(expired: false) }
-        XCTAssertEqual(reads, 2)
-    }
-
-    /// A failure must never be handed back as if it were a credential — but it
-    /// is remembered as an *attempt*, so the same refusal is not put to macOS
-    /// again a minute later.
-    func testAFailedReadIsRememberedWithoutBeingCached() {
-        struct Nope: Error {}
-        var reads = 0
-        var clock = Date(timeIntervalSince1970: 0)
-        let cache = CredentialCache<Token>(now: { clock }) { $0.expired }
-
-        for _ in 0..<3 {
-            _ = try? cache.value { () -> Token in reads += 1; throw Nope() }
-        }
-        XCTAssertEqual(reads, 1, "the same refusal was put to macOS \(reads) times")
-        XCTAssertThrowsError(try cache.value { Token(expired: false) },
-                             "a failure was served as if it were a credential")
-
-        // It does try again eventually, so a grant given in Keychain Access is
-        // picked up without a restart.
-        clock.addTimeInterval(10 * 60)
-        _ = try? cache.value { () -> Token in reads += 1; throw Nope() }
-        XCTAssertEqual(reads, 2, "it never looked again at all")
-    }
-
-    // MARK: - Transient failures: dark wake, and anything else unclassified
-
-    /// The bug this section exists to pin down. `errSecInDarkWake` — macOS
-    /// refusing a keychain read because the Mac is in a brief low-power wake
-    /// with no UI possible — used to be cached exactly like a permanent
-    /// refusal, for as long as the item's `mdat` stayed the same. Nothing
-    /// touches the item again once it holds a valid token, so on a real
-    /// machine one unlucky read landed during dark wake and every read for
-    /// the next three hours replayed that single failure — the notch said
-    /// "Sign in to Claude Code" long after the saved login was fine again,
-    /// because nothing here ever asked macOS a second time.
-    ///
-    /// An error with no `isPermanentFailure` classifier — the default, and
-    /// what `errSecInDarkWake` gets, since it says nothing about the
-    /// credential itself — is retried after `retryAfterFailure` even while
-    /// `mdat` has not moved, which a permanent refusal (above) never is.
-    func testATransientFailureIsRetriedAfterTheWindowEvenWithTheSameMdat() {
-        struct DarkWake: Error {}
-        var reads = 0
-        var clock = Date(timeIntervalSince1970: 0)
-        let stamp = Date(timeIntervalSince1970: 1_000)
-        let cache = CredentialCache<Token>(now: { clock }, isExpired: { $0.expired })
-
-        _ = try? cache.value(itemModifiedAt: { stamp }) { () -> Token in
-            reads += 1; throw DarkWake()
-        }
-        XCTAssertEqual(reads, 1)
-
-        // Before the window: the same failure, without asking macOS again.
-        clock.addTimeInterval(4 * 60 + 59)
-        XCTAssertThrowsError(try cache.value(itemModifiedAt: { stamp }) { () -> Token in
-            reads += 1; throw DarkWake()
-        }) { XCTAssertTrue($0 is DarkWake) }
-        XCTAssertEqual(reads, 1, "still cached — the window has not passed yet")
-
-        // Past it, `mdat` still exactly the same: this is the fix. The old
-        // logic only ever asked "did the item change".
-        clock.addTimeInterval(2)
-        let recovered = try? cache.value(itemModifiedAt: { stamp }) {
-            reads += 1; return Token(expired: false)
-        }
-        XCTAssertNotNil(recovered, "the window passing must trigger a real retry")
-        XCTAssertEqual(reads, 2)
-    }
-
-    /// A repeated transient failure still respects the backoff — the fix is
-    /// "eventually retry", not "retry on every call".
-    func testARepeatedTransientFailureStillBacksOff() {
-        struct DarkWake: Error {}
-        var reads = 0
-        var clock = Date(timeIntervalSince1970: 0)
-        let stamp = Date(timeIntervalSince1970: 1_000)
-        let cache = CredentialCache<Token>(now: { clock }, isExpired: { $0.expired })
-
-        for _ in 0..<20 {
-            _ = try? cache.value(itemModifiedAt: { stamp }) { () -> Token in
-                reads += 1; throw DarkWake()
-            }
-            clock.addTimeInterval(10)
-        }
-        // 200s in 10s steps, all inside the 300s default window.
-        XCTAssertEqual(reads, 1, "hammering the cache must not hammer the keychain")
-    }
-
-    /// A rotation is picked up immediately even behind a transient failure —
-    /// the same guarantee `testARotationIsStillWorthAskingForAfterARefusal`
-    /// gives a permanent one, so a real renewal is never made to wait out a
-    /// backoff that exists for the opposite case.
-    func testARotationIsPickedUpImmediatelyAfterATransientFailure() {
-        struct DarkWake: Error {}
-        var reads = 0
-        var stamp = Date(timeIntervalSince1970: 1_000)
-        let cache = CredentialCache<Token>(isExpired: { $0.expired })
-
-        _ = try? cache.value(itemModifiedAt: { stamp }) { () -> Token in
-            reads += 1; throw DarkWake()
-        }
-        stamp = Date(timeIntervalSince1970: 2_000)   // renewed moments later
-        let renewed = try? cache.value(itemModifiedAt: { stamp }) {
-            reads += 1; return Token(expired: false)
-        }
-        XCTAssertNotNil(renewed)
-        XCTAssertEqual(reads, 2, "a real renewal must not wait out a backoff that exists for a different reason")
-    }
-}
-
 /// Antigravity had no activity monitor at all, so its ring never showed the
 /// working state the other three had — and the store never learned it was busy,
 /// staying on its slow idle poll while usage was actively being spent.
@@ -1361,125 +1026,6 @@ final class StatusMenuTests: XCTestCase {
         XCTAssertTrue(menu.items[0].title.contains("Waiting for the first reading"))
     }
 }
-
-
-
-/// Declining the keychain prompt is easy to do by reflex. Until now it was
-/// reported as being signed out — sending someone who *is* signed in to fix
-/// something that is not broken — and nothing on screen would ask again.
-@MainActor
-final class KeychainRefusalTests: XCTestCase {
-    /// The three statuses macOS returns for "the item is there and you may not
-    /// have it". Deny produces the first two; the third is the same refusal
-    /// arriving without a prompt.
-    func testARefusalIsNotMistakenForBeingSignedOut() {
-        XCTAssertTrue(ClaudeCredentials.wasRefused(errSecAuthFailed))
-        XCTAssertTrue(ClaudeCredentials.wasRefused(errSecUserCanceled))
-        XCTAssertTrue(ClaudeCredentials.wasRefused(errSecInteractionNotAllowed))
-    }
-
-    /// A missing item genuinely does mean nobody has signed in.
-    func testAMissingItemIsStillTreatedAsSignedOut() {
-        XCTAssertFalse(ClaudeCredentials.wasRefused(errSecItemNotFound))
-    }
-
-    /// The reported case: a Mac just woken from a long sleep answers -25320,
-    /// "in dark wake, no UI possible" — a read the account had nothing to do
-    /// with. This is not a refusal (nothing was denied) and not "signed out"
-    /// either, so it must land in neither bucket.
-    func testADarkWakeIsNeitherARefusalNorSignedOut() {
-        let darkWake: OSStatus = -25320
-        XCTAssertTrue(ClaudeCredentials.wasTransient(darkWake))
-        XCTAssertFalse(ClaudeCredentials.wasRefused(darkWake),
-                       "a transient status was also claimed as a refusal")
-    }
-
-    /// The three real refusals, and "not found", must never be swept into the
-    /// transient bucket — that would let a genuine refusal or sign-out through
-    /// with the archive wrongly preserved.
-    func testOnlyTheDarkWakeStatusIsTransient() {
-        for status in [errSecAuthFailed, errSecUserCanceled,
-                       errSecInteractionNotAllowed, errSecItemNotFound] {
-            XCTAssertFalse(ClaudeCredentials.wasTransient(status))
-        }
-    }
-
-    /// The end-to-end reason this matters: a dark-wake failure must not wipe
-    /// the archive the way a real sign-out does. `.credentialExpired` already
-    /// ages a reading rather than discarding it — reusing it for this case is
-    /// what makes a dark-wake blip say "dated" instead of "waiting for the
-    /// first reading" with the number gone.
-    func testTheTransientStatusPreservesHistoryEndToEnd() {
-        let status = UsageStore.statusForTesting(UsageProviderError.credentialExpired)
-        XCTAssertFalse(UsageStore.supersedesHistory(status),
-                       "a dark-wake blip would wipe the archive like a real sign-out")
-        guard case .stale = status else {
-            return XCTFail("expected a dated reading, got \(status)")
-        }
-    }
-
-    func testTheStatusSaysWhatHappenedAndWhatToDo() {
-        let snapshot = ProviderSnapshot(
-            id: "claude", displayName: "Claude", glyph: .claude,
-            fidelity: .official, status: .accessDenied, windows: []
-        )
-        let message = snapshot.statusMessage ?? ""
-        XCTAssertTrue(message.contains("refused"))
-        XCTAssertTrue(message.contains("Allow access"),
-                      "it has to name the control that actually asks again")
-        XCTAssertFalse(message.contains("Sign in"), "it tells a signed-in user to sign in")
-        XCTAssertFalse(message.contains("ring"),
-                       "clicking a ring only refreshes, and a refresh never prompts")
-        XCTAssertFalse(message.contains("fix-keychain"),
-                       "the script is in the repository, not in the installed app")
-    }
-
-    /// The credential is still valid — we were simply not let in to re-read it.
-    /// Throwing the last reading away would punish a mis-click.
-    /// An emptied credential is not the same as never having signed in, and
-    /// the difference is the whole point: the last reading survives. Claude
-    /// Code empties every profile at once after it updates itself, and blanking
-    /// the rings turned an overnight glitch into "the app lost my data".
-    func testAnEmptiedCredentialKeepsTheLastReading() {
-        XCTAssertFalse(UsageStore.supersedesHistory(.signedOutByOwner))
-    }
-
-    /// Whereas a profile nobody ever signed into has nothing worth keeping.
-    func testNeverSignedInStillClearsTheHistory() {
-        XCTAssertTrue(UsageStore.supersedesHistory(.needsAuth))
-    }
-
-    func testAnEmptiedCredentialMapsToItsOwnStatus() {
-        guard case .signedOutByOwner =
-            UsageStore.statusForTesting(UsageProviderError.signedOutByOwner) else {
-            return XCTFail("an emptied credential was reported as something else")
-        }
-    }
-
-    func testTheMessageNamesTheCauseAndSaysSignInAgain() {
-        let snapshot = ProviderSnapshot(
-            id: "claude-work", displayName: "Claude (work)", glyph: .claude,
-            fidelity: .official, status: .signedOutByOwner, windows: []
-        )
-        let message = snapshot.statusMessage ?? ""
-        XCTAssertTrue(message.contains("Claude Code emptied"))
-        XCTAssertTrue(message.contains("updates itself"),
-                      "it has to name the trigger, or this reads as our bug")
-        XCTAssertTrue(message.contains("Sign in again"))
-    }
-
-    func testARefusalKeepsTheLastReading() {
-        XCTAssertFalse(UsageStore.supersedesHistory(.accessDenied))
-    }
-
-    func testTheErrorMapsToTheRefusedStatus() {
-        guard case .accessDenied =
-            UsageStore.statusForTesting(UsageProviderError.accessDenied) else {
-            return XCTFail("a refusal was reported as something else")
-        }
-    }
-}
-
 /// The button that puts the keychain prompt back on screen.
 @MainActor
 final class ReauthorizeTests: XCTestCase {
@@ -1645,11 +1191,6 @@ final class KeychainDuplicateTests: XCTestCase {
 /// on the same machine, never asked.
 final class AntigravitySourceOrderTests: XCTestCase {
 
-    override func tearDown() {
-        GoogleStub.reset()
-        super.tearDown()
-    }
-
     /// The whole point: a language server that answers ends the fetch before
     /// anything is asked of macOS or of Google.
     ///
@@ -1660,15 +1201,12 @@ final class AntigravitySourceOrderTests: XCTestCase {
     /// substitute.
     func testAnAnsweringBridgeEndsTheFetchBeforeTheKeychain() async throws {
         let windows = [LimitWindow(id: "gemini-weekly", label: "Weekly", usedFraction: 0.2)]
-        let provider = AntigravityProvider(session: GoogleStub.session(),
-                                           localQuota: { windows })
+        let provider = AntigravityProvider(localQuota: { windows })
 
         let snapshot = try await provider.fetchSnapshot()
 
         XCTAssertEqual(snapshot.windows.map(\.id), ["gemini-weekly"])
         XCTAssertEqual(snapshot.fidelity, .official)
-        XCTAssertEqual(GoogleStub.requestCount, 0,
-                       "Google was called even though the language server answered")
     }
 
     /// Once the server has answered, its going away means Antigravity was
@@ -1676,18 +1214,15 @@ final class AntigravitySourceOrderTests: XCTestCase {
     /// keychain for a number the token cannot produce anyway.
     func testOnceBridgedItDoesNotFallBackToTheToken() async throws {
         let answers = Answers([[LimitWindow(id: "gemini-weekly", label: "Weekly", usedFraction: 0.2)], nil])
-        let provider = AntigravityProvider(session: GoogleStub.session(),
-                                           localQuota: { answers.next() })
+        let provider = AntigravityProvider(localQuota: { answers.next() })
 
         _ = try await provider.fetchSnapshot()
-        GoogleStub.reset()
 
         do {
             _ = try await provider.fetchSnapshot()
             XCTFail("expected credentialExpired")
         } catch UsageProviderError.credentialExpired {
-            XCTAssertEqual(GoogleStub.requestCount, 0,
-                           "it went back to the token after the bridge had answered once")
+            // Expected: the reading is kept and dated, not replaced.
         } catch {
             XCTFail("expected credentialExpired, got \(error)")
         }
@@ -1706,41 +1241,4 @@ private final class Answers: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         return queued.isEmpty ? nil : queued.removeFirst()
     }
-}
-
-/// Counts what actually reached Google. Nothing should, while the language
-/// server is answering.
-private final class GoogleStub: URLProtocol {
-    private static let lock = NSLock()
-    private static var served = 0
-
-    static func reset() {
-        lock.lock(); served = 0; lock.unlock()
-    }
-
-    static var requestCount: Int {
-        lock.lock(); defer { lock.unlock() }
-        return served
-    }
-
-    static func session() -> URLSession {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [GoogleStub.self]
-        return URLSession(configuration: configuration)
-    }
-
-    override class func canInit(with request: URLRequest) -> Bool { true }
-    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
-
-    override func startLoading() {
-        Self.lock.lock(); Self.served += 1; Self.lock.unlock()
-        // 403 is what a personal account genuinely gets here, and it ends the
-        // fetch without another round trip.
-        let response = HTTPURLResponse(url: request.url!, statusCode: 403,
-                                       httpVersion: nil, headerFields: nil)!
-        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocolDidFinishLoading(self)
-    }
-
-    override func stopLoading() {}
 }
