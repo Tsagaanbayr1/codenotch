@@ -54,8 +54,8 @@ A Windows port — Rust/Tauri 2, same design and providers — lives in [`window
 
 | Provider | Source | How |
 |---|---|---|
-| **Claude Code** | official | Claude Desktop's own cached usage response, where Desktop is running and signed into the same account. Then Claude Code's own `/usage`, asked of the installed `claude`. Then the OAuth token in the login keychain, against the endpoint that command uses. |
-| **Cursor** | official | The editor's signed-in session in its local SQLite state, or the `cursor-agent` login in the keychain — no separate sign-in. |
+| **Claude Code** | official | Claude Desktop's own cached usage response, where Desktop is running and signed into the same account. Then Claude Code's own `/usage`, asked of the installed `claude`. No credential of yours is read at either step. |
+| **Cursor** | official | The editor's signed-in session, read from its local SQLite state — no separate sign-in. Needs the editor: a `cursor-agent` login on its own is not read. |
 | **Codex** | official | ChatGPT's usage endpoint, using the local Codex sign-in. Shows the 5-hour and weekly limits when available. |
 | **DeepSeek Platform** | derived from official Platform responses | Explicit sign-in in Codenotch's own WKWebView, then the Platform account summary and API-key/model usage endpoints. Shows funded/spent balance, 30-day tokens/cost, requests and API-key count. |
 | **Antigravity** | official where licensed, otherwise a request count | Antigravity's local language server first, then Google's quota endpoint; a plain count when neither will answer for the account. |
@@ -255,18 +255,10 @@ the maintainer to cut an official release. See
 [CONTRIBUTING.md](CONTRIBUTING.md). CI runs the same unit tests unsigned via
 `make test-ci`.
 
-A Debug build is ad-hoc signed, which means it has no stable code identity, so
-macOS cannot match it to a saved keychain "Always Allow" — the prompt to read a
-tool's token returns on every launch. To make the grant stick during local
-development, sign the built app with a stable self-signed identity:
-
-```sh
-Scripts/sign-local.sh   # signs /Applications/Codenotch.app (pass a path to override)
-```
-
-It creates a reusable `Codenotch Local Signing` certificate in your login
-keychain (no Apple Developer account needed) and re-signs the app. Grant the
-keychain prompt once more after signing; it will not ask again.
+A Debug build is ad-hoc signed, which no longer costs anything: the app reads
+no keychain item, so there is no "Always Allow" grant for an unstable code
+identity to invalidate. `Scripts/sign-local.sh` still exists if you want a
+stable local identity for other reasons.
 
 Run with `CODENOTCH_DEMO=1` to see fixed sample data instead of live readings.
 
@@ -300,10 +292,9 @@ tests, and every failure degrades to a visible status (`stale`, `needsAuth`,
 **Claude Desktop's cache:** Claude Desktop is a Chromium app, so the usage
 response its own panel draws is written to an HTTP cache file under
 `~/Library/Application Support/Claude`. Reading it is how the ring stays right
-for people who work in Desktop rather than in the terminal — the two Claude
-Code paths below both go dark when `claude "/usage"` stops printing the windows
-and the keychain token has not been re-minted since Claude Code last ran, which
-is an ordinary state for a Desktop user. It is strictly read-only, and narrow:
+for people who work in Desktop rather than in the terminal — `claude "/usage"`
+goes quiet when Claude Code has not run recently, which is an ordinary state
+for a Desktop user. It is strictly read-only, and narrow:
 only entries whose cached URL is *this account's* `/api/organizations/<id>/usage`
 are opened at all, matched on the organization Claude Code records for the
 profile, so one account's numbers can never land on another's ring. No token, no
@@ -315,16 +306,14 @@ ones take over. Bodies are `content-encoding: zstd` and macOS ships no decoder,
 so a decode-only build of Zstandard is vendored under
 [`Sources/Vendor/zstd`](Sources/Vendor/zstd) (BSD-3-Clause).
 
-**Keychain:** Claude's readings do not use it where Claude Code is installed.
-Claude Code files a *new* keychain item on every token rotation, and the new
-item's access list does not carry this app, so an "Always Allow" granted
-against the old one stops working about an hour later — asking `claude` itself
-avoids the question entirely. Where the keychain is still the source (no
-Claude Code on the machine, or Antigravity), the app is signed with a stable
-Developer ID identity so a grant survives rebuilds, and the secret is read
-only when the owning app has actually changed it — checked via the item's
-modification date, which isn't behind the same access prompt as the
-credential — so a valid grant does not mean a prompt on every poll.
+**Keychain:** Codenotch makes no keychain request for any provider's login.
+Claude is read from Desktop's cache and from `claude "/usage"`, Antigravity
+through its own language server, Cursor from the editor's local store — each
+tool uses its own credential and is never asked for it. macOS therefore never
+puts the "wants to use your confidential information" dialogue in front of you,
+and there is no access to grant or decline. The one keychain use left is the
+opposite direction: an Ollama or LM Studio key *you type into Settings* is
+saved as Codenotch's own item, at your request.
 
 **Rate limits:** Claude's endpoint returns 429 if polled too hard, with an
 unhelpful `Retry-After: 0`. The back-off treats that as a floor-raiser only —
