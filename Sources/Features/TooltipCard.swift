@@ -632,38 +632,31 @@ private struct RuntimeModelDetails: View {
     }
 }
 
+/// The tooltip's own figures.
+///
+/// Every one of these used to be pinned to `en_US_POSIX` and to an English
+/// unit letter, which is right for a value being written to a log and wrong
+/// for one being read by a person — a Mongolian card read "1.1M" beside
+/// Mongolian words. They share `NumberCopy`'s vocabulary now, so the tooltip
+/// and the ring cannot drift apart on what a million is called.
 enum UsageFormat {
-    static func tokens(_ value: Int?) -> String {
-        guard let value else { return "—" }
-        switch value {
-        case 1_000_000_000...:
-            return String(format: "%.2fB", locale: Locale(identifier: "en_US_POSIX"),
-                          Double(value) / 1_000_000_000)
-        case 1_000_000...:
-            return String(format: "%.1fM", locale: Locale(identifier: "en_US_POSIX"),
-                          Double(value) / 1_000_000)
-        case 1_000...:
-            return String(format: "%.0fK", locale: Locale(identifier: "en_US_POSIX"),
-                          Double(value) / 1_000)
-        default:
-            return "\(value)"
-        }
+    /// "No reading yet". An em dash is not a word and stays put in every
+    /// language.
+    static let noReading = "—"
+
+    static func tokens(_ value: Int?, locale: Locale = L10n.locale) -> String {
+        guard let value else { return noReading }
+        return NumberCopy.scaled(value, locale: locale)
     }
 
-    static func duration(seconds: Double?) -> String {
-        guard let seconds, seconds.isFinite, seconds > 0 else { return "—" }
-        let minutes = max(1, Int((seconds / 60).rounded()))
-        let hours = minutes / 60
-        let remainder = minutes % 60
-        if hours > 0 {
-            return remainder == 0 ? "\(hours)h" : "\(hours)h \(remainder)m"
-        }
-        return "\(minutes)m"
+    static func duration(seconds: Double?, locale: Locale = L10n.locale) -> String {
+        guard let seconds, seconds.isFinite, seconds > 0 else { return noReading }
+        return NumberCopy.duration(seconds: seconds, locale: locale)
     }
 
-    static func days(_ value: Int?) -> String {
-        guard let value else { return "—" }
-        return "\(value)d"
+    static func days(_ value: Int?, locale: Locale = L10n.locale) -> String {
+        guard let value else { return noReading }
+        return NumberCopy.days(value, locale: locale)
     }
 }
 

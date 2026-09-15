@@ -37,26 +37,43 @@ struct LocalModelPerformance: Equatable {
     var fidelity: Fidelity { .derived }
     var tokensPerSecond: Double { Double(outputTokens) / generationSeconds }
     private var qualifier: String { isApproximate ? "~" : "" }
-    var speedText: String {
-        tokensPerSecond < 0.1 ? "\(qualifier)<0.1 tok/s"
-            : "\(qualifier)\(tokensPerSecond.formatted(.number.precision(.fractionLength(0...1)))) tok/s"
+    var speedText: String { speedText(locale: L10n.locale) }
+
+    /// `~` marks a speed Codenotch timed itself rather than one the runtime
+    /// reported. A symbol, not a word, so it needs no translation.
+    func speedText(locale: Locale = L10n.locale) -> String {
+        guard tokensPerSecond >= 0.1 else {
+            return qualifier + L10n.t("<0.1 tok/s", locale: locale)
+        }
+        let value = tokensPerSecond.formatted(
+            .number.precision(.fractionLength(0...1)).locale(locale))
+        return qualifier + L10n.t("\(value) tok/s", locale: locale)
     }
-    var headlineText: String {
-        guard tokensPerSecond >= 1 else { return "\(qualifier)<1 tok/s" }
+
+    var headlineText: String { headlineText(locale: L10n.locale) }
+
+    /// The ring's own line, so the unit is the short one past a thousand.
+    func headlineText(locale: Locale = L10n.locale) -> String {
+        guard tokensPerSecond >= 1 else { return qualifier + L10n.t("<1 tok/s", locale: locale) }
         let value = tokensPerSecond.formatted(.number.notation(.compactName)
-            .precision(.significantDigits(1...(tokensPerSecond >= 1000 ? 2 : 3))))
-        return "\(qualifier)\(value) \(tokensPerSecond >= 1000 ? "t/s" : "tok/s")"
+            .precision(.significantDigits(1...(tokensPerSecond >= 1000 ? 2 : 3)))
+            .locale(locale))
+        return qualifier + (tokensPerSecond >= 1000
+            ? L10n.t("\(value) t/s", locale: locale)
+            : L10n.t("\(value) tok/s", locale: locale))
     }
 
     enum Band: Equatable {
         case veryFast, smooth, slow, verySlow
 
-        var label: String {
+        var label: String { label(locale: L10n.locale) }
+
+        func label(locale: Locale = L10n.locale) -> String {
             switch self {
-            case .veryFast: return "Very fast"
-            case .smooth: return "Smooth"
-            case .slow: return "Slow"
-            case .verySlow: return "Very slow"
+            case .veryFast: return L10n.t("Very fast", locale: locale)
+            case .smooth:   return L10n.t("Smooth", locale: locale)
+            case .slow:     return L10n.t("Slow", locale: locale)
+            case .verySlow: return L10n.t("Very slow", locale: locale)
             }
         }
         var color: Color {

@@ -93,7 +93,7 @@ private struct OllamaRelayStatus: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Speed and thinking").font(.body.weight(.medium))
+            Text(L10n.t("Speed and thinking")).font(.body.weight(.medium))
             Text(relay.ready ? "Listening at \(OllamaActivityRelay.address)" : relay.status)
                 .foregroundStyle(relay.ready ? Color.secondary : .orange)
                 .textSelection(.enabled)
@@ -102,12 +102,12 @@ private struct OllamaRelayStatus: View {
                      ? "Waiting for a completed response through this address."
                      : "Generation speed received for \(relay.performances.count) model(s).")
                     .foregroundStyle(.secondary)
-                Text("Set your chat client's Ollama address to the one above, or run this in Terminal:")
+                Text(L10n.t("Set your chat client's Ollama address to the one above, or run this in Terminal:"))
                     .foregroundStyle(.secondary)
                 Text("OLLAMA_HOST=\(OllamaActivityRelay.address) ollama")
                     .font(.system(.caption, design: .monospaced))
                     .textSelection(.enabled)
-                Text("Keep Codenotch open. Speed appears after each completed native Ollama response. Requests sent directly to the server address only provide model detection here.")
+                Text(L10n.t("Keep Codenotch open. Speed appears after each completed native Ollama response. Requests sent directly to the server address only provide model detection here."))
                     .foregroundStyle(.secondary)
             }
         }

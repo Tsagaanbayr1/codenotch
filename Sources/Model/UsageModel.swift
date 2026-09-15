@@ -145,10 +145,11 @@ struct LimitWindow: Identifiable, Codable, Equatable {
     /// Requests and credits are three or four digits and print verbatim; token
     /// counts run to seven, and "651061" under the ring is unreadable at that
     /// width. The threshold is 10 000 so no existing provider's number changes.
-    static func compact(_ count: Int) -> String {
-        if count < 10_000 { return "\(count)" }
-        if count < 1_000_000 { return "\(count / 1_000)k" }
-        return String(format: "%.1fM", Double(count) / 1_000_000)
+    ///
+    /// The scale word comes from `NumberCopy`, so Mongolian reads "651 мянга"
+    /// rather than an English "k" sitting in the middle of Mongolian copy.
+    static func compact(_ count: Int, locale: Locale = L10n.locale) -> String {
+        NumberCopy.scaled(count, locale: locale)
     }
 
     /// What the tooltip says on the line under the bar.

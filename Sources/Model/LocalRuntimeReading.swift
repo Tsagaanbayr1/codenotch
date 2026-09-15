@@ -41,18 +41,23 @@ struct LocalRuntimeReading: Equatable {
             return memoryBytes
         }
 
-        var memoryLabel: String {
-            if memoryKind == .modelSize { return "Model size" }
-            guard let gpuMemoryBytes else { return "Memory" }
+        var memoryLabel: String { memoryLabel(locale: L10n.locale) }
+
+        func memoryLabel(locale: Locale = L10n.locale) -> String {
+            // VRAM and RAM are initialisms every language this app ships keeps
+            // as they are, so they are not catalog keys — translating them
+            // would invent a word nobody uses.
+            if memoryKind == .modelSize { return L10n.t("Model size", locale: locale) }
+            guard let gpuMemoryBytes else { return L10n.t("Memory", locale: locale) }
             return gpuMemoryBytes > 0 ? "VRAM" : "RAM"
         }
 
-        func unloadText(now: Date) -> String {
-            guard let expiresAt else { return "Unavailable" }
-            guard expiresAt > now else { return "Pending" }
-            let formatter = RelativeDateTimeFormatter()
-            formatter.unitsStyle = .abbreviated
-            return formatter.localizedString(for: expiresAt, relativeTo: now)
+        func unloadText(now: Date, locale: Locale = L10n.locale) -> String {
+            guard let expiresAt else { return L10n.t("Unavailable", locale: locale) }
+            guard expiresAt > now else { return L10n.t("Pending", locale: locale) }
+            // Went through the system locale before, so a Mongolian card said
+            // "in 4 min" in English next to Mongolian labels.
+            return NumberCopy.relative(expiresAt, to: now, locale: locale)
         }
 
         var id: String { name }
@@ -61,27 +66,40 @@ struct LocalRuntimeReading: Equatable {
                 ?? modelKey.flatMap { LocalModelBrand.detect(modelName: $0) }
         }
 
-        var memoryText: String {
-            guard let memoryBytes = displayedMemoryBytes else { return "—" }
-            let units: [(String, Double)] = [
-                ("EB", pow(1024, 6)), ("PB", pow(1024, 5)),
-                ("TB", pow(1024, 4)), ("GB", pow(1024, 3)),
-                ("MB", pow(1024, 2)), ("KB", 1024), ("B", 1)
-            ]
-            let bytes = Double(memoryBytes)
-            let (unit, divisor) = units.first { bytes >= $0.1 } ?? ("B", 1)
-            let value = (bytes / divisor).formatted(.number.precision(.fractionLength(0...1)))
-            return "\(value) \(unit)"
+        var memoryText: String { memoryText(locale: L10n.locale) }
+
+        /// The hand-rolled table of powers of 1024 this replaced always wrote
+        /// an English "GB" and an English decimal point. The system already
+        /// knows both for every language the app ships.
+        func memoryText(locale: Locale = L10n.locale) -> String {
+            guard let memoryBytes = displayedMemoryBytes else { return UsageFormat.noReading }
+            return NumberCopy.bytes(memoryBytes, locale: locale)
         }
 
-        var contextText: String {
-            contextLength.map { "\($0.formatted()) tokens" } ?? "Unavailable"
+        var contextText: String { contextText(locale: L10n.locale) }
+
+        func contextText(locale: Locale = L10n.locale) -> String {
+            guard let contextLength else { return L10n.t("Unavailable", locale: locale) }
+            return L10n.t("\(NumberCopy.grouped(contextLength, locale: locale)) tokens", locale: locale)
         }
 
-        var quantizationText: String { quantizationLevel ?? "Unavailable" }
+        var quantizationText: String { quantizationText(locale: L10n.locale) }
 
-        var detail: String {
-            "\(memoryLabel) \(displayedMemoryBytes == nil ? "unavailable" : memoryText) · Context limit \(contextText) · Quantization \(quantizationText)"
+        /// A quantization level is the runtime's own label — "Q8_K_XL",
+        /// "8bit" — and is left exactly as the runtime wrote it.
+        func quantizationText(locale: Locale = L10n.locale) -> String {
+            quantizationLevel ?? L10n.t("Unavailable", locale: locale)
+        }
+
+        var detail: String { detail(locale: L10n.locale) }
+
+        func detail(locale: Locale = L10n.locale) -> String {
+            let size = displayedMemoryBytes == nil
+                ? L10n.t("unavailable", locale: locale)
+                : memoryText(locale: locale)
+            return L10n.t(
+                "\(memoryLabel(locale: locale)) \(size) · Context limit \(contextText(locale: locale)) · Quantization \(quantizationText(locale: locale))",
+                locale: locale)
         }
     }
 
@@ -95,8 +113,17 @@ struct LocalRuntimeReading: Equatable {
         self.measuresSpeed = measuresSpeed
     }
 
-    var summary: String {
-        models.isEmpty ? "Server reachable · No models loaded"
-            : "\(models.count) \(models.count == 1 ? "model" : "models") loaded"
+    var summary: String { summary(locale: L10n.locale) }
+
+    /// One model or many. Two keys rather than one with a plural rule, so a
+    /// language whose plural does not split at one — Russian splits at two and
+    /// at five — can say so in the catalog.
+    func summary(locale: Locale = L10n.locale) -> String {
+        guard !models.isEmpty else {
+            return L10n.t("Server reachable · No models loaded", locale: locale)
+        }
+        return models.count == 1
+            ? L10n.t("\(NumberCopy.integer(models.count, locale: locale)) model loaded", locale: locale)
+            : L10n.t("\(NumberCopy.integer(models.count, locale: locale)) models loaded", locale: locale)
     }
 }

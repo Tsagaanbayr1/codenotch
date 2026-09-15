@@ -130,7 +130,12 @@ struct UsageResetCard: View {
                 .padding(.top, NotchLayout.headerToBlock)
 
                 if let resetsAt = event.resetsAt {
-                    Text("\(resetTimePrefix) \(resetsAt.formatted(date: .omitted, time: .shortened))")
+                    // Not an `L10n.t` key: both halves are already in the
+                    // app's language, and "%@ %@" as a catalog entry is a
+                    // string a translator cannot do anything with. `.formatted`
+                    // alone answered in the Mac's language, which put an
+                    // English "4:13 PM" under Mongolian copy.
+                    Text("\(resetTimePrefix) \(NumberCopy.time(resetsAt))")
                         .font(Typography.cardBody)
                         .foregroundStyle(Palette.textSecondary)
                         .lineLimit(1)

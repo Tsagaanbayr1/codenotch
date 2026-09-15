@@ -22,7 +22,10 @@ final class OllamaMemoryTests: XCTestCase {
         let reading = try OllamaLocalUsage.parse(Data(#"{"models":[{"name":"unknown","size":0}]}"#.utf8))
         XCTAssertEqual(reading.models[0].unloadText(now: Date()), "Unavailable")
         XCTAssertEqual(reading.models[0].memoryLabel, "Memory")
-        XCTAssertEqual(reading.models[0].memoryText, "0 B")
+        // "0 bytes", not the old hand-rolled "0 B": the size now goes through
+        // the system's byte formatter, which is what puts "29.3 ГБ" rather
+        // than "29.3 GB" on a Mongolian card.
+        XCTAssertEqual(reading.models[0].memoryText, "0 bytes")
         let date = try XCTUnwrap(OllamaLocalUsage.parseISO8601("2026-09-08T19:00:00Z"))
         let model = LocalRuntimeReading.Model(name: "cpu", memoryBytes: nil, contextLength: nil,
                                               quantizationLevel: nil, expiresAt: date)
