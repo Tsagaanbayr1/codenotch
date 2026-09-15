@@ -1,8 +1,8 @@
 import XCTest
 @testable import Codenotch
 
-/// In-app language is a stored override, not the Mac's language. Follow
-/// System still hits the XCTest English pin when nothing is stored.
+/// In-app language defaults to Mongolian; an explicit Follow System choice
+/// still hits the XCTest English pin in the test host.
 final class AppLanguageTests: XCTestCase {
     private var suiteName = ""
     private var previousDefaults: UserDefaults?
@@ -32,13 +32,25 @@ final class AppLanguageTests: XCTestCase {
         super.tearDown()
     }
 
-    func testFollowSystemUsesTheEnglishPinWhenNothingIsStored() {
+    func testFollowSystemUsesTheEnglishPinWhenExplicitlyStored() {
         L10n.apply(.system)
         L10n.testLocale = nil
         XCTAssertTrue(
             L10n.locale.identifier.hasPrefix("en"),
-            "XCTest pin should return English when appLanguage is unset, got \(L10n.locale.identifier)"
+            "XCTest pin should return English when Follow System is stored, got \(L10n.locale.identifier)"
         )
+    }
+
+    func testMongolianIsTheDefaultForAnUnsetPreference() {
+        L10n.defaults.removeObject(forKey: L10n.languageDefaultsKey)
+        L10n.testLocale = nil
+        XCTAssertEqual(L10n.locale.identifier, "mn")
+    }
+
+    func testMongolianIsOfferedAndMapsToMn() {
+        XCTAssertTrue(AppLanguage.allCases.contains(.mongolian))
+        XCTAssertEqual(AppLanguage.mongolian.title, "Монгол")
+        XCTAssertEqual(AppLanguage.mongolian.locale?.identifier, "mn")
     }
 
     /// A forced English must actually be English. The catalog files its

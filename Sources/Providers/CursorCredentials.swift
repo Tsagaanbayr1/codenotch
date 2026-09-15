@@ -133,7 +133,7 @@ struct CursorCredentials {
         }
     }
 
-    /// Open the editor when it is installed; otherwise name the CLI command.
+    /// Open the editor when it is installed; otherwise guide the install.
     /// Offering "Open Cursor" on a machine that has never had the app is a
     /// button that does nothing — worse than no button.
     static func signInRoute(editorInstalled: Bool) -> SignInRoute {

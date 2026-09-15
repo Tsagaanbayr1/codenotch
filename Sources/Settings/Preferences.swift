@@ -492,19 +492,20 @@ final class Preferences: ObservableObject {
             .flatMap(AccentColorChoice.init(rawValue:)) ?? .system
         self.notchSurfaceStyle = defaults.string(forKey: Keys.notchSurfaceStyle)
             .flatMap(NotchSurfaceStyle.init(rawValue:)) ?? .glass
-        // Absent means never chosen, which is follow-the-Mac.
+        // Absent means never chosen, so new installs start in Mongolian.
         self.language = defaults.string(forKey: L10n.languageDefaultsKey)
-            .flatMap(AppLanguage.init(rawValue:)) ?? .system
+            .flatMap(AppLanguage.init(rawValue:)) ?? .mongolian
         // Absent means nothing has been shown yet, which is true of a fresh
         // install — so the current release reads as new to it.
         self.lastSeenVersion = defaults.string(forKey: Keys.lastSeenVersion)
         // Absent means never chosen, so the rings keep the order the app ships
         // with until someone drags one.
         self.providerOrder = defaults.stringArray(forKey: Keys.order) ?? []
-        // Both default to on, so `bool(forKey:)` — which answers false for a
-        // key that was never written — cannot stand in for the default.
+        // A never-written announce key defaults on, so `bool(forKey:)` —
+        // which answers false for an absent key — cannot stand in for it.
+        // The chime sound itself defaults off under the same explicit read.
         self.announceSessionEnd = defaults.object(forKey: Keys.announceSessionEnd) as? Bool ?? true
-        self.sessionEndSound = defaults.object(forKey: Keys.sessionEndSound) as? Bool ?? true
+        self.sessionEndSound = defaults.object(forKey: Keys.sessionEndSound) as? Bool ?? false
         self.peekDuration = defaults.string(forKey: Keys.peekDuration)
             .flatMap(PeekDuration.init(rawValue:)) ?? .standard
         self.sessionEndSoundName = defaults.string(forKey: Keys.sessionEndSoundName)
@@ -512,12 +513,12 @@ final class Preferences: ObservableObject {
         self.sessionBlockedSoundName = defaults.string(forKey: Keys.sessionBlockedSoundName)
             ?? SessionChime.defaultBlocked
         self.announceUsageReset = defaults.object(forKey: Keys.announceUsageReset) as? Bool ?? true
-        self.usageResetSound = defaults.object(forKey: Keys.usageResetSound) as? Bool ?? true
+        self.usageResetSound = defaults.object(forKey: Keys.usageResetSound) as? Bool ?? false
         self.usageResetSoundName = defaults.string(forKey: Keys.usageResetSoundName)
             ?? SessionChime.defaultFinished
         self.announceSessionLimitReached = defaults.object(forKey: Keys.announceSessionLimitReached) as? Bool ?? true
         self.announceWeeklyLimitReached = defaults.object(forKey: Keys.announceWeeklyLimitReached) as? Bool ?? true
-        self.limitReachedSound = defaults.object(forKey: Keys.limitReachedSound) as? Bool ?? true
+        self.limitReachedSound = defaults.object(forKey: Keys.limitReachedSound) as? Bool ?? false
         self.limitReachedSoundName = defaults.string(forKey: Keys.limitReachedSoundName)
             ?? SessionChime.defaultBlocked
         self.geminiAPIMonthlyTokenBudget = Self.storedGeminiAPIMonthlyTokenBudget(defaults: defaults)

@@ -2,11 +2,12 @@ import Foundation
 
 /// Which language Codenotch's own copy uses.
 ///
-/// Follow System is the default. A forced choice exists because the Mac's
+/// Mongolian is the default. A forced choice exists because the Mac's
 /// language is not always the one the person wants this app in — bilingual
 /// machines, or a Mac in a language we do not ship.
 enum AppLanguage: String, CaseIterable, Identifiable {
     case system = "system"
+    case mongolian = "mn"
     case english = "en"
     case french = "fr"
     case japanese = "ja"
@@ -25,6 +26,7 @@ enum AppLanguage: String, CaseIterable, Identifiable {
     var locale: Locale? {
         switch self {
         case .system:              return nil
+        case .mongolian:           return Locale(identifier: "mn")
         case .english:             return Locale(identifier: "en")
         case .french:              return Locale(identifier: "fr")
         case .japanese:            return Locale(identifier: "ja")
@@ -34,12 +36,13 @@ enum AppLanguage: String, CaseIterable, Identifiable {
         }
     }
 
-    /// English, Français, 日本語, Português (Brasil), Русский and 简体中文 stay in their
+    /// Монгол, English, Français, 日本語, Português (Brasil), Русский and 简体中文 stay in their
     /// own language so the row is recognizable when the rest of Settings is in
     /// another one.
     var title: String {
         switch self {
         case .system:              return L10n.t("Follow System")
+        case .mongolian:           return "Монгол"
         case .english:             return "English"
         case .french:              return "Français"
         case .japanese:            return "日本語"
@@ -53,7 +56,7 @@ enum AppLanguage: String, CaseIterable, Identifiable {
         switch self {
         case .system:
             return L10n.t("Matches the Mac's preferred language.")
-        case .english, .french, .japanese, .brazilianPortuguese, .russian, .simplifiedChinese:
+        case .mongolian, .english, .french, .japanese, .brazilianPortuguese, .russian, .simplifiedChinese:
             return L10n.t("Codenotch uses this language even if the Mac does not.")
         }
     }

@@ -43,18 +43,21 @@ enum L10n {
         // answered by the rules below.
         if isTest, defaults == .standard { return Locale(identifier: "en") }
 
-        // Existing assertions stay English on a Chinese Mac. A stored
-        // override still wins so a test can pin zh-Hans without testLocale.
-        if isTest, stored == nil || stored == AppLanguage.system.rawValue {
+        // Existing assertions stay English when Follow System is selected. A
+        // stored override still wins so a test can pin a locale without testLocale.
+        if isTest, stored == AppLanguage.system.rawValue {
             return Locale(identifier: "en")
         }
+
+        if stored == AppLanguage.system.rawValue { return .current }
 
         if let stored,
            let language = AppLanguage(rawValue: stored),
            let locale = language.locale {
             return locale
         }
-        return .current
+        // An unset preference is a fresh install, which starts in Mongolian.
+        return Locale(identifier: "mn")
     }
 
     static func t(_ key: String.LocalizationValue, locale: Locale = locale) -> String {
@@ -68,13 +71,8 @@ enum L10n {
     }
 
     static func apply(_ language: AppLanguage) {
-        // Absence, not the string "system": the XCTest English pin treats a
-        // missing key as follow-the-Mac.
-        if language == .system {
-            defaults.removeObject(forKey: languageDefaultsKey)
-        } else {
-            defaults.set(language.rawValue, forKey: languageDefaultsKey)
-        }
+        // Keep an explicit system choice: absence is the Mongolian default.
+        defaults.set(language.rawValue, forKey: languageDefaultsKey)
         NotificationCenter.default.post(name: didChange, object: nil)
     }
 }

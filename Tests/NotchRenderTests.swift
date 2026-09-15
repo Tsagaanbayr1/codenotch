@@ -1,5 +1,6 @@
 import SwiftUI
 import XCTest
+import CoreGraphics
 @testable import Codenotch
 
 /// The layout maths can be right in every unit and still put nothing on the
@@ -547,6 +548,16 @@ final class EdgeArrivalTests: XCTestCase {
         RunLoop.current.run(until: Date().addingTimeInterval(seconds))
     }
 
+    /// The arrival animation is real Core Animation: its crossfade completes
+    /// on a frame, and a sleeping display never advances one, so the alpha and
+    /// unfold asserts below time out. Same class of environment as the
+    /// headless-CI skip — skip it too.
+    private func skipUnlessAnimationRuns() throws {
+        try XCTSkipIf(NSUserName() == "runner", "Animation timing is flaky on headless CI environments")
+        try XCTSkipIf(CGDisplayIsAsleep(CGMainDisplayID()) != 0,
+                      "Animation timing stalls while the display is asleep")
+    }
+
     private func openController() -> NotchWindowController {
         let controller = NotchWindowController()
         controller.show()
@@ -577,7 +588,7 @@ final class EdgeArrivalTests: XCTestCase {
     /// value goes shut-to-open inside one update, nothing interpolates, and the
     /// notch simply appears at full size having animated nothing.
     func testItLandsFoldedAndThenOpens() throws {
-        try XCTSkipIf(NSUserName() == "runner", "Animation timing is flaky on headless CI environments")
+        try skipUnlessAnimationRuns()
         let controller = openController()
         defer { controller.stop() }
 
@@ -591,7 +602,7 @@ final class EdgeArrivalTests: XCTestCase {
 
     /// And it is on screen while it opens, not still fading in underneath.
     func testItIsFullyVisibleBeforeItOpens() throws {
-        try XCTSkipIf(NSUserName() == "runner", "Animation timing is flaky on headless CI environments")
+        try skipUnlessAnimationRuns()
         let controller = openController()
         defer { controller.stop() }
 
@@ -602,7 +613,8 @@ final class EdgeArrivalTests: XCTestCase {
     }
 
     /// A notch that was folded stays folded: moving it is not a reason to open.
-    func testAFoldedNotchArrivesFolded() {
+    func testAFoldedNotchArrivesFolded() throws {
+        try skipUnlessAnimationRuns()
         let controller = openController()
         defer { controller.stop() }
         controller.model.isExpanded = false

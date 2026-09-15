@@ -40,6 +40,21 @@ final class CatalogCoverageTests: XCTestCase {
         }
     }
 
+    func testMongolianCoreCopyIsTranslated() throws {
+        let catalog = try loadCatalog().json
+        let expected = [
+            "just now": "саяхан",
+            "Resets in %lld min": "%lld мин дараа шинэчлэгдэнэ",
+            "%lld%% Used · %lld%% left": "%lld%% ашигласан · %lld%% үлдсэн",
+            "Always show": "Үргэлж харуулах",
+            "Settings…": "Тохиргоо…",
+            "Language": "Хэл"
+        ]
+        for (key, value) in expected {
+            XCTAssertEqual(catalog.strings[key]?.localizations?["mn"]?.stringUnit?.value, value)
+        }
+    }
+
 
     /// There is deliberately no "language X covers every key" test.
     ///

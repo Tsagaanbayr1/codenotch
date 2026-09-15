@@ -11,6 +11,7 @@ final class LocalizationTests: XCTestCase {
     private let russian = Locale(identifier: "ru")
     private let brazilianPortuguese = Locale(identifier: "pt-BR")
     private let english = Locale(identifier: "en")
+    private let mongolian = Locale(identifier: "mn")
     private let now = Date(timeIntervalSince1970: 1_787_900_000)
     private let resetNow = Date(timeIntervalSince1970: 1_700_000_000)
 
@@ -136,6 +137,15 @@ final class LocalizationTests: XCTestCase {
     func testMenuCopyInEnglishWhenAsked() {
         XCTAssertEqual(L10n.t("Always show", locale: english), "Always show")
         XCTAssertEqual(L10n.t("Settings…", locale: english), "Settings…")
+    }
+
+    func testCoreCopyInMongolian() {
+        XCTAssertEqual(L10n.t("Always show", locale: mongolian), "Үргэлж харуулах")
+        XCTAssertEqual(L10n.t("Settings…", locale: mongolian), "Тохиргоо…")
+        XCTAssertEqual(
+            ElapsedCopy.text(since: now.addingTimeInterval(-6 * 60), now: now, locale: mongolian),
+            "6 мин"
+        )
     }
 
     // MARK: - Sign-in
@@ -423,7 +433,7 @@ final class LocalizationTests: XCTestCase {
     func testEveryOfferedLanguageResolves() {
         XCTAssertEqual(
             AppLanguage.allCases.map(\.rawValue),
-            ["system", "en", "fr", "ja", "pt-BR", "ru", "zh-Hans"]
+            ["system", "mn", "en", "fr", "ja", "pt-BR", "ru", "zh-Hans"]
         )
         XCTAssertNil(AppLanguage.system.locale)
         for language in AppLanguage.allCases where language != .system {

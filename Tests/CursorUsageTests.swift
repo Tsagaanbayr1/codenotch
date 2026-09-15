@@ -241,12 +241,12 @@ final class CursorCredentialsTests: XCTestCase {
         XCTAssertEqual(name, "Cursor")
     }
 
-    func testSignInNamesTheCLIWhenTheEditorIsMissing() {
+    func testSignInGuidesTheInstallWhenTheEditorIsMissing() {
         guard case .guidance(let text) =
                 CursorCredentials.signInRoute(editorInstalled: false) else {
             return XCTFail("expected guidance")
         }
-        XCTAssertTrue(text.contains("cursor-agent login"), text)
+        XCTAssertTrue(text.contains("Install Cursor"), text)
     }
 
     private func writeAgentConfig(authId: String?, userId: Int, email: String) throws -> URL {
