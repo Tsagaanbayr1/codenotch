@@ -18661,6 +18661,83 @@
           }
         }
       }
+    },
+    "Counts, clocks and units now speak the language the app is set to.": {
+      "extractionState": "manual",
+      "localizations": {
+        "mn": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Тоо, цаг, нэгжүүд одоо аппын тохируулсан хэлээр ярина."
+          }
+        }
+      }
+    },
+    "Large numbers are said, not abbreviated in English": {
+      "extractionState": "manual",
+      "localizations": {
+        "mn": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Том тоог англиар товчлохын оронд хэлээрээ бичнэ"
+          }
+        }
+      }
+    },
+    "A ring set to Монгол read \"651k\" beside Mongolian words. It reads \"651 мянга\" now, and \"1.1 сая\" past a million, with Russian, French and Portuguese carrying their own abbreviations. English is unchanged.": {
+      "extractionState": "manual",
+      "localizations": {
+        "mn": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Монгол болгосон цагираг монгол үгсийн хажууд «651k» гэж уншигддаг байсан. Одоо «651 мянга», саяас дээш бол «1.1 сая» гэж уншигдана. Орос, франц, португал хэл өөрсдийн товчлолыг хэрэглэнэ. Англи хэл өөрчлөгдөөгүй."
+          }
+        }
+      }
+    },
+    "Times, durations and memory sizes follow the app, not the Mac": {
+      "extractionState": "manual",
+      "localizations": {
+        "mn": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Цаг, үргэлжлэх хугацаа, санах ойн хэмжээ Mac-ийг биш аппыг дагана"
+          }
+        }
+      }
+    },
+    "A reset time, a \"4 min ago\" and a model's size were formatted in whatever language macOS was in, which put English figures under translated labels. They take the language from Settings now.": {
+      "extractionState": "manual",
+      "localizations": {
+        "mn": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Шинэчлэгдэх цаг, «4 мин өмнө», загварын хэмжээ зэрэг нь macOS-ийн хэлээр хэлбэржиж, орчуулсан шошгоны доор англи тоо гарч байсан. Одоо Тохиргооноос хэлээ авна."
+          }
+        }
+      }
+    },
+    "The local-model and server copy is translated at all": {
+      "extractionState": "manual",
+      "localizations": {
+        "mn": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Локал загвар ба серверийн бичвэр анх удаа орчуулагдлаа"
+          }
+        }
+      }
+    },
+    "Loaded models, generation speed, and the Ollama and LM Studio settings and error messages were English literals with no translation to fall back to. Around a hundred of them are now in the catalog.": {
+      "extractionState": "manual",
+      "localizations": {
+        "mn": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ачаалагдсан загварууд, үүсгэх хурд, Ollama ба LM Studio-гийн тохиргоо, алдааны мэдээллүүд нь орчуулга огт байхгүй англи бичвэрүүд байлаа. Одоо тэдгээрийн зуу орчим нь каталогт орсон."
+          }
+        }
+      }
     }
   },
   "version": "1.0"

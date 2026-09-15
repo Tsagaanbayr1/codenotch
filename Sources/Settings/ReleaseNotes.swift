@@ -32,6 +32,24 @@ enum ReleaseNotes {
     static var all: [ReleaseNote] {
         [
             ReleaseNote(
+                version: "1.12.0",
+                headline: L10n.t("Counts, clocks and units now speak the language the app is set to."),
+                changes: [
+                    ReleaseNote.Change(
+                        title: L10n.t("Large numbers are said, not abbreviated in English"),
+                        detail: L10n.t("A ring set to Монгол read \"651k\" beside Mongolian words. It reads \"651 мянга\" now, and \"1.1 сая\" past a million, with Russian, French and Portuguese carrying their own abbreviations. English is unchanged.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("Times, durations and memory sizes follow the app, not the Mac"),
+                        detail: L10n.t("A reset time, a \"4 min ago\" and a model's size were formatted in whatever language macOS was in, which put English figures under translated labels. They take the language from Settings now.")
+                    ),
+                    ReleaseNote.Change(
+                        title: L10n.t("The local-model and server copy is translated at all"),
+                        detail: L10n.t("Loaded models, generation speed, and the Ollama and LM Studio settings and error messages were English literals with no translation to fall back to. Around a hundred of them are now in the catalog.")
+                    ),
+                ]
+            ),
+            ReleaseNote(
                 version: "1.11.0",
                 headline: L10n.t("No keychain access anywhere in the app: your saved logins stay yours."),
                 changes: [
